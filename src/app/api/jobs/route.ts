@@ -12,8 +12,16 @@ type GreenhouseResponse = {
   jobs?: GreenhouseJob[];
 };
 
+type LeverJob = {
+  id: string;
+  text: string;
+  hostedUrl: string;
+  createdAt?: number;
+  categories?: { location?: string };
+};
+
 type SeniorityBand = "junior" | "middle" | "senior";
-type CompanySizeBand = "startup" | "scaleup" | "enterprise" | "all";
+type CompanySizeBand = "startup" | "scaleup" | "enterprise";
 
 type RealJob = {
   id: string;
@@ -23,15 +31,18 @@ type RealJob = {
   source: string;
   applyUrl: string;
   postedAt?: string;
-  companySize: Exclude<CompanySizeBand, "all">;
+  companySize: CompanySizeBand;
   matchScore: number;
   fitReason: string;
+  linkedinTargetRole: string;
+  linkedinSearchUrl: string;
+  outreachTip: string;
 };
 
 type BoardConfig = {
   slug: string;
   company: string;
-  size: Exclude<CompanySizeBand, "all">;
+  size: CompanySizeBand;
 };
 
 const US_GREENHOUSE_BOARDS: BoardConfig[] = [
@@ -62,10 +73,93 @@ const US_GREENHOUSE_BOARDS: BoardConfig[] = [
   { slug: "instabase", company: "Instabase", size: "startup" },
   { slug: "opendoor", company: "Opendoor", size: "enterprise" },
   { slug: "tripadvisor", company: "Tripadvisor", size: "enterprise" },
+  { slug: "asana", company: "Asana", size: "scaleup" },
+  { slug: "gitlab", company: "GitLab", size: "enterprise" },
+  { slug: "xai", company: "xAI", size: "startup" },
+  { slug: "samsara", company: "Samsara", size: "enterprise" },
+  { slug: "databricks", company: "Databricks", size: "enterprise" },
+  { slug: "mongodb", company: "MongoDB", size: "enterprise" },
+  { slug: "yext", company: "Yext", size: "scaleup" },
+  { slug: "braze", company: "Braze", size: "scaleup" },
+  { slug: "squarespace", company: "Squarespace", size: "scaleup" },
+  { slug: "instacart", company: "Instacart", size: "enterprise" },
+  { slug: "coursera", company: "Coursera", size: "scaleup" },
+  { slug: "udemy", company: "Udemy", size: "scaleup" },
+  { slug: "quip", company: "Quip", size: "startup" },
+  { slug: "pinterest", company: "Pinterest", size: "enterprise" },
+  { slug: "cloudflare", company: "Cloudflare", size: "enterprise" },
+];
+
+const US_LEVER_BOARDS: BoardConfig[] = [
+  { slug: "mindtickle", company: "Mindtickle", size: "scaleup" },
 ];
 
 function normalize(value: string): string {
   return value.toLowerCase().trim();
+}
+
+function tokenize(text: string): string[] {
+  return normalize(text)
+    .replace(/[^a-z0-9\s]/g, " ")
+    .split(/\s+/)
+    .filter((token) => token.length > 2);
+}
+
+function roleIntentTokens(role: string): string[] {
+  const stop = new Set([
+    "senior",
+    "junior",
+    "middle",
+    "manager",
+    "lead",
+    "head",
+    "principal",
+    "specialist",
+    "associate",
+    "remote",
+    "global",
+    "the",
+    "and",
+    "for",
+  ]);
+  return tokenize(role).filter((token) => !stop.has(token));
+}
+
+function strictRoleMatch(title: string, role: string): boolean {
+  const t = normalize(title);
+  const r = normalize(role);
+  if (!r) return true;
+  if (t.includes(r)) return true;
+
+  const roleTokens = roleIntentTokens(role);
+  if (!roleTokens.length) return true;
+  if (!roleTokens.every((token) => t.includes(token))) return false;
+
+  const pairConflicts: Array<[string, string[]]> = [
+    ["mobility", ["supply", "logistics", "procurement", "operations"]],
+    ["supply", ["mobility", "immigration", "relocation"]],
+    ["recruit", ["sales", "account executive"]],
+  ];
+  for (const [intent, conflicts] of pairConflicts) {
+    if (roleTokens.includes(intent) && conflicts.some((word) => t.includes(word))) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function roleAdjacentMatch(title: string, role: string): boolean {
+  const t = normalize(title);
+  const roleTokens = roleIntentTokens(role);
+  if (!roleTokens.length) return false;
+
+  if (roleTokens.includes("mobility")) {
+    const positive = ["mobility", "immigration", "relocation", "people", "hr", "talent"];
+    const negative = ["supply", "procurement", "logistics", "warehouse"];
+    return positive.some((word) => t.includes(word)) && !negative.some((word) => t.includes(word));
+  }
+
+  return roleTokens.some((token) => t.includes(token));
 }
 
 function seniorityFromTitle(title: string): SeniorityBand {
@@ -128,16 +222,32 @@ function estimateCandidateBand(
   return "middle";
 }
 
-function parseCompanySizes(value: string | null): Exclude<CompanySizeBand, "all">[] {
+function parseCompanySizes(value: string | null): CompanySizeBand[] {
   if (!value) return ["startup", "scaleup", "enterprise"];
-  const allowed: Exclude<CompanySizeBand, "all">[] = ["startup", "scaleup", "enterprise"];
+  const allowed: CompanySizeBand[] = ["startup", "scaleup", "enterprise"];
   const parsed = value
     .split(",")
     .map((item) => normalize(item))
-    .filter((item): item is Exclude<CompanySizeBand, "all"> =>
-      allowed.includes(item as Exclude<CompanySizeBand, "all">),
-    );
+    .filter((item): item is CompanySizeBand => allowed.includes(item as CompanySizeBand));
   return parsed.length ? parsed : ["startup", "scaleup", "enterprise"];
+}
+
+function deriveLinkedinTargetRole(title: string): string {
+  const t = normalize(title);
+  if (t.includes("product")) return "Senior Product Recruiter";
+  if (t.includes("mobility")) return "Global Mobility Recruiter";
+  if (t.includes("engineering") || t.includes("software") || t.includes("backend") || t.includes("frontend")) {
+    return "Engineering Recruiter";
+  }
+  if (t.includes("data")) return "Data Recruiting Manager";
+  if (t.includes("design")) return "Design Recruiting Lead";
+  if (t.includes("sales")) return "Sales Recruiter";
+  return "Talent Acquisition Partner";
+}
+
+function linkedinSearchUrl(company: string, role: string, location: string): string {
+  const query = encodeURIComponent(`${role} ${company} ${location} site:linkedin.com/in`);
+  return `https://www.google.com/search?q=${query}`;
 }
 
 function scoreJobMatch(
@@ -153,11 +263,12 @@ function scoreJobMatch(
   const normalizedJobLocation = normalize(jobLocation);
 
   let score = 55;
-  if (normalizedRole && normalizedTitle.includes(normalizedRole)) score += 24;
+  if (normalizedRole && normalizedTitle.includes(normalizedRole)) score += 30;
   else {
-    const roleWords = normalizedRole.split(/\s+/).filter(Boolean);
+    const roleWords = roleIntentTokens(role);
     const overlaps = roleWords.filter((word) => normalizedTitle.includes(word)).length;
-    score += Math.min(18, overlaps * 6);
+    score += Math.min(18, overlaps * 7);
+    if (roleWords.length && overlaps === roleWords.length) score += 8;
   }
 
   if (!normalizedLocation) score += 8;
@@ -176,9 +287,9 @@ function scoreJobMatch(
   if (candidateBand === "junior" && band === "middle") score += 2;
   if (candidateBand === "middle" && band === "junior") score += 1;
   if (candidateBand === "middle" && band === "senior") score -= 8;
-  if (candidateBand === "junior" && band === "senior") score -= 18;
+  if (candidateBand === "junior" && band === "senior") score -= 20;
 
-  return Math.max(40, Math.min(97, score));
+  return Math.max(40, Math.min(98, score));
 }
 
 function buildFitReason(
@@ -230,7 +341,7 @@ function isLikelyUSLocation(raw: string): boolean {
   return /\b[A-Z]{2}\b/.test(raw) && /,\s?[A-Z]{2}\b/.test(raw);
 }
 
-async function fetchBoardJobs(board: BoardConfig): Promise<RealJob[]> {
+async function fetchGreenhouseBoardJobs(board: BoardConfig): Promise<RealJob[]> {
   const url = `https://boards-api.greenhouse.io/v1/boards/${board.slug}/jobs?content=false`;
   const response = await fetch(url, {
     headers: {
@@ -247,6 +358,7 @@ async function fetchBoardJobs(board: BoardConfig): Promise<RealJob[]> {
 
   return jobs.map((job) => {
     const location = job.location?.name?.trim() || "United States";
+    const targetRole = deriveLinkedinTargetRole(job.title);
     return {
       id: `${board.slug}-${job.id}`,
       title: job.title,
@@ -258,6 +370,42 @@ async function fetchBoardJobs(board: BoardConfig): Promise<RealJob[]> {
       companySize: board.size,
       matchScore: 0,
       fitReason: "",
+      linkedinTargetRole: targetRole,
+      linkedinSearchUrl: linkedinSearchUrl(board.company, targetRole, location),
+      outreachTip: `Найдите в LinkedIn: ${targetRole} в ${board.company}. Сфокусируйтесь на людях из Talent Acquisition / Recruiting Team.`,
+    };
+  });
+}
+
+async function fetchLeverBoardJobs(board: BoardConfig): Promise<RealJob[]> {
+  const url = `https://api.lever.co/v0/postings/${board.slug}?mode=json`;
+  const response = await fetch(url, {
+    headers: {
+      "User-Agent": "RoleRadar/1.0 (+internal-tool)",
+      Accept: "application/json",
+    },
+    cache: "no-store",
+  });
+  if (!response.ok) return [];
+  const jobs = (await response.json()) as LeverJob[];
+  return jobs.map((job) => {
+    const title = job.text || "Untitled role";
+    const location = job.categories?.location || "United States";
+    const targetRole = deriveLinkedinTargetRole(title);
+    return {
+      id: `${board.slug}-${job.id}`,
+      title,
+      company: board.company,
+      location,
+      source: `Lever (${board.company})`,
+      applyUrl: job.hostedUrl,
+      postedAt: job.createdAt ? new Date(job.createdAt).toISOString() : undefined,
+      companySize: board.size,
+      matchScore: 0,
+      fitReason: "",
+      linkedinTargetRole: targetRole,
+      linkedinSearchUrl: linkedinSearchUrl(board.company, targetRole, location),
+      outreachTip: `Напишите ${targetRole} в ${board.company} с коротким value pitch и ссылкой на профиль.`,
     };
   });
 }
@@ -279,7 +427,7 @@ function parsePostedAt(value: string | undefined): Date | null {
 export async function GET(request: NextRequest) {
   const role = request.nextUrl.searchParams.get("role")?.trim() || "";
   const location = request.nextUrl.searchParams.get("location")?.trim() || "";
-  const limit = Number(request.nextUrl.searchParams.get("limit") || "12");
+  const limit = Number(request.nextUrl.searchParams.get("limit") || "36");
   const companySizes = parseCompanySizes(request.nextUrl.searchParams.get("companySizes"));
   const daysWindowRaw = Number(request.nextUrl.searchParams.get("daysWindow") || "7");
   const daysWindow = Math.max(1, Math.min(30, Number.isNaN(daysWindowRaw) ? 7 : daysWindowRaw));
@@ -293,33 +441,31 @@ export async function GET(request: NextRequest) {
   );
 
   try {
-    const allSettled = await Promise.allSettled(US_GREENHOUSE_BOARDS.map((board) => fetchBoardJobs(board)));
+    const [greenhouseSettled, leverSettled] = await Promise.all([
+      Promise.allSettled(US_GREENHOUSE_BOARDS.map((board) => fetchGreenhouseBoardJobs(board))),
+      Promise.allSettled(US_LEVER_BOARDS.map((board) => fetchLeverBoardJobs(board))),
+    ]);
 
-    const fetched = allSettled
+    const greenhouseJobs = greenhouseSettled
+      .filter((item): item is PromiseFulfilledResult<RealJob[]> => item.status === "fulfilled")
+      .flatMap((item) => item.value);
+    const leverJobs = leverSettled
       .filter((item): item is PromiseFulfilledResult<RealJob[]> => item.status === "fulfilled")
       .flatMap((item) => item.value);
 
+    const fetched = [...greenhouseJobs, ...leverJobs];
     const usOnly = fetched.filter((job) => isLikelyUSLocation(job.location));
     const recentOnly = usOnly.filter((job) => {
       const postedAt = parsePostedAt(job.postedAt);
       if (!postedAt) return false;
       return postedAt >= cutoffDate;
     });
-
     const byCompanySize = recentOnly.filter((job) => companySizes.includes(job.companySize));
-
-    const byRole = role
-      ? byCompanySize.filter((job) => {
-          const title = normalize(job.title);
-          const roleLower = normalize(role);
-          if (title.includes(roleLower)) return true;
-          return roleLower
-            .split(/\s+/)
-            .filter(Boolean)
-            .some((word) => word.length > 2 && title.includes(word));
-        })
+    const byRole = role ? byCompanySize.filter((job) => strictRoleMatch(job.title, role)) : byCompanySize;
+    const byRoleAdjacent = role
+      ? byCompanySize.filter((job) => roleAdjacentMatch(job.title, role))
       : byCompanySize;
-
+    const strictRoleRequested = Boolean(roleIntentTokens(role).length);
     const byBand = byRole.filter((job) => {
       const band = seniorityFromTitle(job.title);
       if (candidateBand === "junior") return band === "junior" || band === "middle";
@@ -327,9 +473,22 @@ export async function GET(request: NextRequest) {
       return true;
     });
 
-    const fallbackPool = byBand.length ? byBand : byCompanySize;
+    // Progressive fallback to keep meaningful volume while preserving relevance.
+    const pool = strictRoleRequested
+      ? byBand.length
+        ? byBand
+        : byRoleAdjacent.length
+          ? byRoleAdjacent
+          : byRole
+      : byBand.length >= 8
+        ? byBand
+        : byRole.length >= 8
+          ? byRole
+          : byCompanySize.length >= 8
+            ? byCompanySize
+            : recentOnly;
 
-    const sorted = fallbackPool
+    const sorted = pool
       .map((job) => {
         const score = scoreJobMatch(job.title, role, location, job.location, candidateBand);
         return {
@@ -339,10 +498,10 @@ export async function GET(request: NextRequest) {
         };
       })
       .sort((a, b) => b.matchScore - a.matchScore)
-      .slice(0, Math.max(1, Math.min(30, limit)));
+      .slice(0, Math.max(1, Math.min(80, limit)));
 
     return NextResponse.json({
-      source: "US job sites (Greenhouse company boards)",
+      source: "US job sites (Greenhouse + Lever)",
       role,
       location,
       candidateBand,
@@ -353,6 +512,7 @@ export async function GET(request: NextRequest) {
       totalRecent: recentOnly.length,
       totalRecentAfterSize: byCompanySize.length,
       totalRoleMatched: byRole.length,
+      totalRoleAdjacent: byRoleAdjacent.length,
       totalBandMatched: byBand.length,
       jobs: sorted,
     });

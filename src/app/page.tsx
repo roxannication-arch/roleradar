@@ -25,6 +25,10 @@ type Job = {
   outreachStatus: OutreachStatus;
   source: string;
   applyUrl: string;
+  postedAt?: string;
+  linkedinTargetRole?: string;
+  linkedinSearchUrl?: string;
+  outreachTip?: string;
 };
 
 type Client = {
@@ -67,6 +71,9 @@ type JobsApiItem = {
   source: string;
   applyUrl: string;
   postedAt?: string;
+  linkedinTargetRole?: string;
+  linkedinSearchUrl?: string;
+  outreachTip?: string;
 };
  
 const CANDIDATE_LEVEL_OPTIONS: { value: CandidateLevel; label: string }[] = [
@@ -367,9 +374,12 @@ export default function Home() {
       const params = new URLSearchParams({
         role: activeClient.targetRole || "",
         location: activeClient.location || "",
-        resume: activeClient.resume || "",
-        candidateLevel: activeClient.candidateLevel,
+        resumeText: activeClient.resume || "",
+        candidateBand: activeClient.candidateLevel,
+        experienceYears: activeClient.experienceYears || "",
         companySizes: activeClient.preferredCompanySizes.join(","),
+        daysWindow: "7",
+        limit: "60",
       });
       const response = await fetch(`/api/jobs?${params.toString()}`);
       if (!response.ok) {
@@ -380,8 +390,18 @@ export default function Home() {
       const jobs: Job[] = payload.jobs.map((item, index) => ({
         ...item,
         contactStatus: index < 4 ? "Потенциальный контакт" : "Не найден",
-        likelyContact: index < 4 ? `Recruiter ${item.company}` : "",
-        contactConfidence: index < 4 ? 65 + (index % 3) * 10 : 0,
+        likelyContact:
+          item.linkedinTargetRole && index < 8
+            ? `${item.linkedinTargetRole} (${item.company})`
+            : index < 4
+              ? `Recruiter ${item.company}`
+              : "",
+        contactConfidence:
+          item.linkedinTargetRole && item.linkedinSearchUrl
+            ? 82
+            : index < 4
+              ? 65 + (index % 3) * 10
+              : 0,
         outreachStatus: index < 3 ? "Готов к отправке" : "Черновик",
       }));
 
@@ -801,14 +821,35 @@ export default function Home() {
                     </div>
 
                     <p className="mt-3 text-sm text-slate-700">{job.fitReason}</p>
-                    <a
-                      href={job.applyUrl}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="mt-2 inline-flex text-xs font-semibold text-blue-700 underline decoration-blue-300 underline-offset-2 hover:text-blue-800"
-                    >
-                      Открыть вакансию на сайте
-                    </a>
+                    <div className="mt-3 space-y-2 rounded-xl border border-blue-100 bg-blue-50/60 p-3">
+                      <p className="text-xs font-semibold uppercase tracking-wide text-blue-800">
+                        Рекомендация по outreach в LinkedIn
+                      </p>
+                      <p className="text-sm text-slate-700">
+                        {job.outreachTip ||
+                          `Ищите ${job.linkedinTargetRole || "Talent Acquisition Partner"} в ${
+                            job.company
+                          } и отправьте короткое интро с референсом на вакансию.`}
+                      </p>
+                      <div className="flex flex-wrap items-center gap-3">
+                        <a
+                          href={job.linkedinSearchUrl}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="inline-flex text-xs font-semibold text-blue-700 underline decoration-blue-300 underline-offset-2 hover:text-blue-800"
+                        >
+                          Найти контакт в LinkedIn
+                        </a>
+                        <a
+                          href={job.applyUrl}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="inline-flex text-xs font-semibold text-slate-700 underline decoration-slate-300 underline-offset-2 hover:text-slate-900"
+                        >
+                          Открыть вакансию
+                        </a>
+                      </div>
+                    </div>
 
                     <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
                       <div>
