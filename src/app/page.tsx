@@ -19,8 +19,9 @@ type Job = {
   location: string;
   matchScore: number;
   fitReason: string;
-  matchSignals?: string[];
-  matchWarnings?: string[];
+  fitSignals?: string[];
+  fitRisks?: string[];
+  matchCategory?: "exact" | "adjacent";
   contactStatus: ContactStatus;
   likelyContact: string;
   contactConfidence: number;
@@ -64,24 +65,24 @@ type JobsApiItem = {
   location: string;
   matchScore: number;
   fitReason: string;
-  matchSignals?: string[];
-  matchWarnings?: string[];
+  fitSignals?: string[];
+  fitRisks?: string[];
   source: string;
   applyUrl: string;
   postedAt?: string;
   linkedinTargetRole?: string;
   linkedinSearchUrl?: string;
   outreachTip?: string;
-  fitSignals?: string[];
-  fitRisks?: string[];
 };
 
 type JobsApiPayload = {
   jobs: JobsApiItem[];
+  exactMatches?: JobsApiItem[];
+  adjacentMatches?: JobsApiItem[];
   noResultsReason?: string;
   suggestedRoleHints?: string[];
 };
- 
+
 const CANDIDATE_LEVEL_OPTIONS: { value: CandidateLevel; label: string }[] = [
   { value: "auto", label: "Авто (по резюме)" },
   { value: "junior", label: "Junior" },
@@ -478,6 +479,8 @@ export default function Home() {
   if (!activeClient) {
     return <main className="p-8">Нет активного клиента.</main>;
   }
+  const exactJobs = activeClient.jobs.filter((job) => job.matchCategory === "exact");
+  const adjacentJobs = activeClient.jobs.filter((job) => job.matchCategory === "adjacent");
 
   return (
     <main className="min-h-screen bg-gradient-to-b from-slate-100 to-slate-50 p-4 text-slate-900 md:p-6">
@@ -806,125 +809,153 @@ export default function Home() {
                 </p>
               </div>
             ) : (
-              <div className="space-y-3">
-                {activeClient.jobs.map((job) => (
-                  <article
-                    key={job.id}
-                    className="rounded-2xl border border-slate-200 bg-slate-50/55 p-4 transition hover:border-slate-300 hover:bg-white"
-                  >
-                    <div className="flex flex-wrap items-start justify-between gap-3">
-                      <div>
-                        <h4 className="text-base font-semibold text-slate-900">{job.title}</h4>
-                        <p className="text-sm text-slate-500">
-                          {job.company} · {job.location}
-                        </p>
-                        <p className="mt-1 text-xs text-slate-400">
-                          Источник: {job.source}
-                        </p>
-                      </div>
-                      <span
-                        className={`rounded-full border px-3 py-1 text-xs font-semibold ${scoreTone(
-                          job.matchScore,
-                        )}`}
-                      >
-                        Match {job.matchScore}%
-                      </span>
-                    </div>
-
-                    <p className="mt-3 text-sm text-slate-700">{job.fitReason}</p>
-                    <p className="mt-2 text-xs text-slate-500">
-                      Обоснование мэтча: роль + навыки из резюме + seniority + локация.
-                    </p>
-                    <div className="mt-3 space-y-2 rounded-xl border border-blue-100 bg-blue-50/60 p-3">
-                      <p className="text-xs font-semibold uppercase tracking-wide text-blue-800">
-                        Рекомендация по outreach в LinkedIn
-                      </p>
-                      <p className="text-sm text-slate-700">
-                        {job.outreachTip ||
-                          `Ищите ${job.linkedinTargetRole || "Talent Acquisition Partner"} в ${
-                            job.company
-                          } и отправьте короткое интро с референсом на вакансию.`}
-                      </p>
-                      <div className="flex flex-wrap items-center gap-3">
-                        <a
-                          href={job.linkedinSearchUrl}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="inline-flex text-xs font-semibold text-blue-700 underline decoration-blue-300 underline-offset-2 hover:text-blue-800"
-                        >
-                          Найти контакт в LinkedIn
-                        </a>
-                        <a
-                          href={job.applyUrl}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="inline-flex text-xs font-semibold text-slate-700 underline decoration-slate-300 underline-offset-2 hover:text-slate-900"
-                        >
-                          Открыть вакансию
-                        </a>
-                      </div>
-                    </div>
-
-                    <div className="mt-4 rounded-xl border border-slate-200 bg-white p-3">
-                      <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-                        Операционный шаг по вакансии
-                      </p>
-                      <div className="mt-2 grid grid-cols-1 gap-3 md:grid-cols-3">
-                        <div className="md:col-span-2">
-                          <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">
-                            Кому писать
-                          </label>
-                          <input
-                            value={job.likelyContact}
-                            onChange={(e) => updateJob(job.id, { likelyContact: e.target.value })}
-                            placeholder="Имя/роль контакта в LinkedIn"
-                            className="h-10 w-full rounded-lg border border-slate-300 bg-white px-2 text-sm outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
-                          />
-                        </div>
-                        <div>
-                          <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">
-                            Следующий шаг
-                          </label>
-                          <select
-                            value={job.outreachStatus}
-                            onChange={(e) =>
-                              updateJob(job.id, {
-                                outreachStatus: e.target.value as OutreachStatus,
-                              })
-                            }
-                            className="h-10 w-full rounded-lg border border-slate-300 bg-white px-2 text-sm outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
-                          >
-                            {OUTREACH_STATUS_OPTIONS.map((status) => (
-                              <option key={status} value={status}>
-                                {status}
-                              </option>
-                            ))}
-                          </select>
-                        </div>
-                      </div>
-                      <div className="mt-3 flex flex-wrap items-center gap-2">
-                        <button
-                          type="button"
-                          onClick={() =>
-                            updateJob(job.id, {
-                              contactStatus: "Контакт подтверждён",
-                              outreachStatus:
-                                job.outreachStatus === "Не начат"
-                                  ? "Черновик"
-                                  : job.outreachStatus,
-                            })
-                          }
-                          className="inline-flex h-8 items-center justify-center rounded-md border border-emerald-200 bg-emerald-50 px-3 text-xs font-semibold text-emerald-700 transition hover:bg-emerald-100"
-                        >
-                          Контакт подтверждён
-                        </button>
-                        <span className="text-xs text-slate-500">
-                          Текущий статус: {job.contactStatus}
+              <div className="space-y-6">
+                {[
+                  { key: "exact", title: "Exact match (роль подтверждена)", jobs: exactJobs },
+                  { key: "adjacent", title: "Adjacent match (смежный контур)", jobs: adjacentJobs },
+                ]
+                  .filter((group) => group.jobs.length > 0)
+                  .map((group) => (
+                    <div key={group.key} className="space-y-3">
+                      <div className="flex items-center justify-between">
+                        <h4 className="text-sm font-semibold uppercase tracking-wide text-slate-600">
+                          {group.title}
+                        </h4>
+                        <span className="rounded-full border border-slate-200 bg-slate-50 px-2.5 py-1 text-xs font-medium text-slate-600">
+                          {group.jobs.length} шт.
                         </span>
                       </div>
+
+                      {group.jobs.map((job) => (
+                        <article
+                          key={job.id}
+                          className="rounded-2xl border border-slate-200 bg-slate-50/55 p-4 transition hover:border-slate-300 hover:bg-white"
+                        >
+                          <div className="flex flex-wrap items-start justify-between gap-3">
+                            <div>
+                              <h4 className="text-base font-semibold text-slate-900">{job.title}</h4>
+                              <p className="text-sm text-slate-500">
+                                {job.company} · {job.location}
+                              </p>
+                              <p className="mt-1 text-xs text-slate-400">Источник: {job.source}</p>
+                            </div>
+                            <span
+                              className={`rounded-full border px-3 py-1 text-xs font-semibold ${scoreTone(
+                                job.matchScore,
+                              )}`}
+                            >
+                              Match {job.matchScore}%
+                            </span>
+                          </div>
+
+                          <p className="mt-3 text-sm text-slate-700">{job.fitReason}</p>
+                          <p className="mt-2 text-xs text-slate-500">
+                            Обоснование мэтча: роль + описание вакансии + навыки из резюме + seniority + локация.
+                          </p>
+                          {job.fitSignals?.length ? (
+                            <div className="mt-2 flex flex-wrap gap-2">
+                              {job.fitSignals.slice(0, 4).map((signal, index) => (
+                                <span
+                                  key={`${job.id}-signal-${index}`}
+                                  className="rounded-full border border-blue-200 bg-blue-50 px-2 py-1 text-[11px] text-blue-800"
+                                >
+                                  {signal}
+                                </span>
+                              ))}
+                            </div>
+                          ) : null}
+                          <div className="mt-3 space-y-2 rounded-xl border border-blue-100 bg-blue-50/60 p-3">
+                            <p className="text-xs font-semibold uppercase tracking-wide text-blue-800">
+                              Рекомендация по outreach в LinkedIn
+                            </p>
+                            <p className="text-sm text-slate-700">
+                              {job.outreachTip ||
+                                `Ищите ${job.linkedinTargetRole || "Talent Acquisition Partner"} в ${
+                                  job.company
+                                } и отправьте короткое интро с референсом на вакансию.`}
+                            </p>
+                            <div className="flex flex-wrap items-center gap-3">
+                              <a
+                                href={job.linkedinSearchUrl}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="inline-flex text-xs font-semibold text-blue-700 underline decoration-blue-300 underline-offset-2 hover:text-blue-800"
+                              >
+                                Найти контакт в LinkedIn
+                              </a>
+                              <a
+                                href={job.applyUrl}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="inline-flex text-xs font-semibold text-slate-700 underline decoration-slate-300 underline-offset-2 hover:text-slate-900"
+                              >
+                                Открыть вакансию
+                              </a>
+                            </div>
+                          </div>
+
+                          <div className="mt-4 rounded-xl border border-slate-200 bg-white p-3">
+                            <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                              Операционный шаг по вакансии
+                            </p>
+                            <div className="mt-2 grid grid-cols-1 gap-3 md:grid-cols-3">
+                              <div className="md:col-span-2">
+                                <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">
+                                  Кому писать
+                                </label>
+                                <input
+                                  value={job.likelyContact}
+                                  onChange={(e) => updateJob(job.id, { likelyContact: e.target.value })}
+                                  placeholder="Имя/роль контакта в LinkedIn"
+                                  className="h-10 w-full rounded-lg border border-slate-300 bg-white px-2 text-sm outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+                                />
+                              </div>
+                              <div>
+                                <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">
+                                  Следующий шаг
+                                </label>
+                                <select
+                                  value={job.outreachStatus}
+                                  onChange={(e) =>
+                                    updateJob(job.id, {
+                                      outreachStatus: e.target.value as OutreachStatus,
+                                    })
+                                  }
+                                  className="h-10 w-full rounded-lg border border-slate-300 bg-white px-2 text-sm outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+                                >
+                                  {OUTREACH_STATUS_OPTIONS.map((status) => (
+                                    <option key={status} value={status}>
+                                      {status}
+                                    </option>
+                                  ))}
+                                </select>
+                              </div>
+                            </div>
+                            <div className="mt-3 flex flex-wrap items-center gap-2">
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  updateJob(job.id, {
+                                    contactStatus: "Контакт подтверждён",
+                                    outreachStatus:
+                                      job.outreachStatus === "Не начат"
+                                        ? "Черновик"
+                                        : job.outreachStatus,
+                                  })
+                                }
+                                className="inline-flex h-8 items-center justify-center rounded-md border border-emerald-200 bg-emerald-50 px-3 text-xs font-semibold text-emerald-700 transition hover:bg-emerald-100"
+                              >
+                                Контакт подтверждён
+                              </button>
+                              <span className="text-xs text-slate-500">
+                                Текущий статус: {job.contactStatus}
+                              </span>
+                            </div>
+                          </div>
+                        </article>
+                      ))}
                     </div>
-                  </article>
-                ))}
+                  ))}
               </div>
             )}
           </section>
