@@ -27,11 +27,19 @@ type MatchContext = {
   roleTokens: string[];
   matchedRoleTokens: string[];
   matchedRoleConcepts: string[];
+  matchedAdjacentTerms: string[];
   resumeSkillsMatched: string[];
   locationMatched: boolean;
   seniorityMatched: boolean;
+  hasNegativeDomainConflict: boolean;
   penalties: string[];
   baseRoleScore: number;
+};
+
+type RoleProfile = {
+  core: string[];
+  adjacent: string[];
+  negative: string[];
 };
 
 type RealJob = {
@@ -101,6 +109,10 @@ const US_GREENHOUSE_BOARDS: BoardConfig[] = [
   { slug: "quip", company: "Quip", size: "startup" },
   { slug: "pinterest", company: "Pinterest", size: "enterprise" },
   { slug: "cloudflare", company: "Cloudflare", size: "enterprise" },
+  { slug: "vercel", company: "Vercel", size: "scaleup" },
+  { slug: "chime", company: "Chime", size: "scaleup" },
+  { slug: "faire", company: "Faire", size: "scaleup" },
+  { slug: "sofi", company: "SoFi", size: "enterprise" },
 ];
 
 const US_LEVER_BOARDS: BoardConfig[] = [{ slug: "mindtickle", company: "Mindtickle", size: "scaleup" }];
@@ -133,6 +145,12 @@ const SKILL_KEYWORDS = [
   "talent",
   "recruiting",
   "mobility",
+  "immigration",
+  "relocation",
+  "visa",
+  "workday",
+  "hris",
+  "hrbp",
 ];
 
 const ROLE_SYNONYMS: Record<string, string[]> = {
@@ -142,6 +160,67 @@ const ROLE_SYNONYMS: Record<string, string[]> = {
   frontend: ["frontend", "ui", "web", "react"],
   product: ["product", "pm"],
   engineer: ["engineer", "engineering", "developer"],
+};
+
+const DOMAIN_PROFILES: Record<
+  string,
+  {
+    core?: string[];
+    adjacent?: string[];
+    negative?: string[];
+  }
+> = {
+  mobility: {
+    core: ["mobility", "global mobility", "immigration", "relocation", "visa"],
+    adjacent: [
+      "people operations",
+      "people ops",
+      "human resources",
+      "people partner",
+      "benefits",
+      "global leaves",
+      "employee relations",
+      "international assignment",
+    ],
+    negative: ["supply", "logistics", "procurement", "warehouse", "fulfillment", "transportation"],
+  },
+  recruiter: {
+    core: ["recruiter", "recruiting", "talent acquisition", "sourcer"],
+    adjacent: ["talent", "staffing", "people", "ta"],
+    negative: ["account executive", "sales"],
+  },
+  product: {
+    core: ["product", "pm", "product manager"],
+    adjacent: ["growth", "roadmap", "platform"],
+  },
+  backend: {
+    core: ["backend", "api", "platform", "server"],
+    adjacent: ["distributed", "microservices", "reliability", "infrastructure"],
+  },
+  frontend: {
+    core: ["frontend", "web", "ui", "react"],
+    adjacent: ["design systems", "typescript", "javascript"],
+  },
+  engineer: {
+    core: ["engineer", "engineering", "developer"],
+    adjacent: ["software", "platform", "infrastructure"],
+  },
+  data: {
+    core: ["data", "analytics", "analyst", "scientist", "ml"],
+    adjacent: ["bi", "sql", "warehouse"],
+  },
+  marketing: {
+    core: ["marketing", "demand generation", "growth marketing"],
+    adjacent: ["brand", "performance", "campaign"],
+  },
+  sales: {
+    core: ["sales", "account executive", "business development"],
+    adjacent: ["pipeline", "gtm"],
+  },
+  finance: {
+    core: ["finance", "fp&a", "accounting", "controller"],
+    adjacent: ["audit", "treasury", "compliance"],
+  },
 };
 
 function expandRoleConcepts(tokens: string[]): string[] {
@@ -154,6 +233,27 @@ function expandRoleConcepts(tokens: string[]): string[] {
     }
   }
   return unique(expanded);
+}
+
+function buildRoleProfile(role: string): RoleProfile {
+  const tokens = roleIntentTokens(role);
+  const expanded = expandRoleConcepts(tokens);
+  const adjacent: string[] = [];
+  const negative: string[] = [];
+
+  for (const token of tokens) {
+    const domain = DOMAIN_PROFILES[token];
+    if (!domain) continue;
+    if (domain.core?.length) expanded.push(...domain.core);
+    if (domain.adjacent?.length) adjacent.push(...domain.adjacent);
+    if (domain.negative?.length) negative.push(...domain.negative);
+  }
+
+  return {
+    core: unique(expanded),
+    adjacent: unique(adjacent),
+    negative: unique(negative),
+  };
 }
 
 function normalize(value: string): string {
@@ -169,6 +269,20 @@ function tokenize(text: string): string[] {
 
 function unique<T>(arr: T[]): T[] {
   return [...new Set(arr)];
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function containsTermInNormalized(normalizedText: string, term: string): boolean {
+  const normalizedTerm = normalize(term);
+  if (!normalizedTerm) return false;
+  if (normalizedTerm.includes(" ")) {
+    return normalizedText.includes(normalizedTerm);
+  }
+  const pattern = new RegExp(`(^|[^a-z0-9])${escapeRegExp(normalizedTerm)}([^a-z0-9]|$)`);
+  return pattern.test(normalizedText);
 }
 
 function roleIntentTokens(role: string): string[] {
@@ -195,37 +309,29 @@ function strictRoleMatch(title: string, role: string): boolean {
   const t = normalize(title);
   const r = normalize(role);
   if (!r) return true;
-  if (t.includes(r)) return true;
-
   const roleTokens = roleIntentTokens(role);
+  const profile = buildRoleProfile(role);
+  if (profile.negative.some((term) => containsTermInNormalized(t, term))) return false;
+  if (containsTermInNormalized(t, r)) return true;
   if (!roleTokens.length) return true;
-  if (!roleTokens.every((token) => t.includes(token))) return false;
+  if (roleTokens.every((token) => containsTermInNormalized(t, token))) return true;
 
-  const pairConflicts: Array<[string, string[]]> = [
-    ["mobility", ["supply", "logistics", "procurement", "operations"]],
-    ["supply", ["mobility", "immigration", "relocation"]],
-    ["recruit", ["sales", "account executive"]],
-  ];
-  for (const [intent, conflicts] of pairConflicts) {
-    if (roleTokens.includes(intent) && conflicts.some((word) => t.includes(word))) {
-      return false;
-    }
-  }
-  return true;
+  const matchedCore = profile.core.filter((term) => containsTermInNormalized(t, term)).length;
+  if (roleTokens.length === 1) return matchedCore >= 1;
+  return matchedCore >= 2 && roleTokens.some((token) => containsTermInNormalized(t, token));
 }
 
 function roleAdjacentMatch(title: string, role: string): boolean {
   const t = normalize(title);
   const roleTokens = roleIntentTokens(role);
   if (!roleTokens.length) return false;
+  const profile = buildRoleProfile(role);
+  if (profile.negative.some((term) => containsTermInNormalized(t, term))) return false;
+  if (strictRoleMatch(title, role)) return true;
 
-  if (roleTokens.includes("mobility")) {
-    const positive = ["mobility", "immigration", "relocation"];
-    const negative = ["supply", "procurement", "logistics", "warehouse"];
-    return positive.some((word) => t.includes(word)) && !negative.some((word) => t.includes(word));
-  }
-
-  return roleTokens.some((token) => t.includes(token));
+  const adjacentMatches = profile.adjacent.filter((term) => containsTermInNormalized(t, term));
+  if (adjacentMatches.length > 0) return true;
+  return profile.core.some((term) => containsTermInNormalized(t, term));
 }
 
 function seniorityFromTitle(title: string): SeniorityBand {
@@ -303,7 +409,7 @@ function linkedinSearchUrl(company: string, role: string, location: string): str
 
 function extractResumeSkills(resumeText: string): string[] {
   const lower = normalize(resumeText);
-  return SKILL_KEYWORDS.filter((skill) => lower.includes(skill));
+  return SKILL_KEYWORDS.filter((skill) => containsTermInNormalized(lower, skill));
 }
 
 function buildMatchContext(
@@ -318,37 +424,55 @@ function buildMatchContext(
   const normalizedRole = normalize(role);
   const normalizedLocation = normalize(location);
   const normalizedJobLocation = normalize(jobLocation);
+  const roleProfile = buildRoleProfile(role);
 
   const roleTokens = roleIntentTokens(role);
-  const roleConcepts = expandRoleConcepts(roleTokens);
-  const matchedRoleTokens = roleTokens.filter((token) => normalizedTitle.includes(token));
-  const matchedRoleConcepts = roleConcepts.filter((concept) => normalizedTitle.includes(concept));
+  const roleConcepts = roleProfile.core;
+  const matchedRoleTokens = roleTokens.filter((token) => containsTermInNormalized(normalizedTitle, token));
+  const matchedRoleConcepts = roleConcepts.filter((concept) =>
+    containsTermInNormalized(normalizedTitle, concept),
+  );
+  const matchedAdjacentTerms = roleProfile.adjacent.filter((term) =>
+    containsTermInNormalized(normalizedTitle, term),
+  );
+  const hasNegativeDomainConflict = roleProfile.negative.some((term) =>
+    containsTermInNormalized(normalizedTitle, term),
+  );
 
   let baseRoleScore = 0;
   if (normalizedRole && normalizedTitle.includes(normalizedRole)) {
-    baseRoleScore += 42;
+    baseRoleScore += 46;
   } else if (roleTokens.length) {
-    baseRoleScore += Math.min(30, matchedRoleTokens.length * 10);
-    if (matchedRoleTokens.length === roleTokens.length) baseRoleScore += 10;
-    baseRoleScore += Math.min(8, matchedRoleConcepts.length * 2);
+    baseRoleScore += Math.min(26, matchedRoleTokens.length * 8);
+    baseRoleScore += Math.min(20, matchedRoleConcepts.length * 5);
+    baseRoleScore += Math.min(9, matchedAdjacentTerms.length * 3);
+    if (matchedRoleTokens.length === roleTokens.length && roleTokens.length > 0) baseRoleScore += 6;
   } else {
     baseRoleScore += 12;
   }
 
-  const resumeSkillsMatched = resumeSkills.filter((skill) => normalizedTitle.includes(skill));
+  const resumeSkillsMatched = resumeSkills.filter((skill) =>
+    containsTermInNormalized(normalizedTitle, skill),
+  );
   const locationMatched =
     !normalizedLocation ||
     normalizedJobLocation.includes(normalizedLocation) ||
     normalizedJobLocation.includes("remote") ||
     normalizedJobLocation.includes("united states") ||
     normalizedJobLocation.includes("us");
-  const seniorityMatched = seniorityFromTitle(title) === candidateBand;
+  const jobBand = seniorityFromTitle(title);
+  const seniorityMatched = jobBand === candidateBand;
 
   const penalties: string[] = [];
+  if (hasNegativeDomainConflict) penalties.push("domain-conflict");
+  if (roleTokens.length && matchedRoleConcepts.length === 0 && matchedAdjacentTerms.length === 0) {
+    penalties.push("low-role-evidence");
+  }
   if (roleTokens.length >= 2 && matchedRoleTokens.length < Math.ceil(roleTokens.length / 2)) {
     penalties.push("low-role-token-overlap");
   }
   if (!locationMatched) penalties.push("location-mismatch");
+  if (candidateBand === "middle" && jobBand === "senior") penalties.push("seniority-overreach");
   if (!seniorityMatched && candidateBand === "junior" && seniorityFromTitle(title) === "senior") {
     penalties.push("seniority-gap");
   }
@@ -356,26 +480,32 @@ function buildMatchContext(
   return {
     roleTokens,
     matchedRoleConcepts: unique(matchedRoleConcepts),
+    matchedAdjacentTerms: unique(matchedAdjacentTerms),
     matchedRoleTokens,
     resumeSkillsMatched: unique(resumeSkillsMatched),
     locationMatched,
     seniorityMatched,
+    hasNegativeDomainConflict,
     penalties,
     baseRoleScore,
   };
 }
 
 function scoreJobMatch(context: MatchContext, candidateBand: SeniorityBand): number {
-  let score = 35 + context.baseRoleScore;
+  let score = 30 + context.baseRoleScore;
 
   score += Math.min(10, context.matchedRoleConcepts.length * 3);
+  score += Math.min(10, context.matchedAdjacentTerms.length * 3);
   score += Math.min(18, context.resumeSkillsMatched.length * 6);
   if (context.locationMatched) score += 8;
   if (context.seniorityMatched) score += 8;
 
   if (candidateBand === "junior" && !context.seniorityMatched) score -= 16;
+  if (context.penalties.includes("domain-conflict")) score -= 30;
+  if (context.penalties.includes("low-role-evidence")) score -= 18;
   if (context.penalties.includes("low-role-token-overlap")) score -= 14;
   if (context.penalties.includes("location-mismatch")) score -= 6;
+  if (context.penalties.includes("seniority-overreach")) score -= 8;
   if (context.penalties.includes("seniority-gap")) score -= 12;
 
   return Math.max(30, Math.min(99, score));
@@ -392,7 +522,9 @@ function buildFitReason(
       ? `Совпали ключевые сигналы роли: ${context.matchedRoleTokens.join(", ")}.`
       : context.matchedRoleConcepts.length > 0
         ? `Точных токенов роли нет, но совпали смысловые маркеры: ${context.matchedRoleConcepts.join(", ")}.`
-        : `Точное совпадение роли не найдено, матч построен по смежным признакам.`;
+        : context.matchedAdjacentTerms.length > 0
+          ? `Прямых role-маркеров нет, но найдено смежное доменное совпадение: ${context.matchedAdjacentTerms.join(", ")}.`
+          : `Точное совпадение роли не найдено, матч построен по слабым смежным признакам.`;
 
   const skillsPart = context.resumeSkillsMatched.length
     ? `Из резюме совпали навыки/домены: ${context.resumeSkillsMatched.join(", ")}.`
@@ -605,34 +737,71 @@ export async function GET(request: NextRequest) {
         );
         const score = scoreJobMatch(context, candidateBand);
         return {
-          ...job,
-          matchScore: score,
-          fitReason: buildFitReason(role, location, candidateBand, context),
-          fitSignals: [
-            context.matchedRoleTokens.length
-              ? `Роль: ${context.matchedRoleTokens.join(", ")}`
-              : context.matchedRoleConcepts.length
-                ? `Семантика роли: ${context.matchedRoleConcepts.join(", ")}`
-                : "Роль: слабое совпадение",
-            context.resumeSkillsMatched.length
-              ? `Навыки из резюме: ${context.resumeSkillsMatched.join(", ")}`
-              : "Навыки из резюме: прямых совпадений нет",
-            context.locationMatched ? "Локация: совпадает" : "Локация: частичное совпадение",
-            context.seniorityMatched
-              ? `Уровень: совпадает (${candidateBand})`
-              : `Уровень: частичное расхождение (${candidateBand})`,
-          ],
-          fitRisks: context.penalties,
+          context,
+          job: {
+            ...job,
+            matchScore: score,
+            fitReason: buildFitReason(role, location, candidateBand, context),
+            fitSignals: [
+              context.matchedRoleTokens.length
+                ? `Роль: ${context.matchedRoleTokens.join(", ")}`
+                : context.matchedRoleConcepts.length
+                  ? `Семантика роли: ${context.matchedRoleConcepts.join(", ")}`
+                  : "Роль: слабое совпадение",
+              context.resumeSkillsMatched.length
+                ? `Навыки из резюме: ${context.resumeSkillsMatched.join(", ")}`
+                : "Навыки из резюме: прямых совпадений нет",
+              context.locationMatched ? "Локация: совпадает" : "Локация: частичное совпадение",
+              context.seniorityMatched
+                ? `Уровень: совпадает (${candidateBand})`
+                : `Уровень: частичное расхождение (${candidateBand})`,
+            ],
+            fitRisks: context.penalties,
+          },
         };
       })
-      .sort((a, b) => b.matchScore - a.matchScore);
+      .sort((a, b) => b.job.matchScore - a.job.matchScore);
 
-    const minScore = role ? 58 : 45;
-    const precisionFiltered = scored.filter((job) => job.matchScore >= minScore);
-    const sorted = (role ? precisionFiltered : precisionFiltered.length ? precisionFiltered : scored).slice(
+    let minScore = role ? 58 : 45;
+    let poolUsed = strictRoleRequested
+      ? byBand.length
+        ? "strict-role+band"
+        : byRoleAdjacent.length
+          ? "strict-role-adjacent"
+          : "strict-role"
+      : byBand.length >= 8
+        ? "band"
+        : byRole.length >= 8
+          ? "role"
+          : byCompanySize.length >= 8
+            ? "company-size"
+            : "recent";
+
+    let precisionFiltered = scored.filter((item) => item.job.matchScore >= minScore);
+
+    // For niche domains (e.g. mobility), allow adjacent HR/People evidence
+    // only when strict/core evidence is absent in current 7-day US dataset.
+    if (strictRoleRequested && precisionFiltered.length === 0) {
+      const adjacentEvidenceOnly = scored.filter(
+        (item) =>
+          !item.context.hasNegativeDomainConflict &&
+          item.context.matchedRoleConcepts.length === 0 &&
+          item.context.matchedAdjacentTerms.length > 0 &&
+          item.job.matchScore >= 50,
+      );
+      if (adjacentEvidenceOnly.length > 0) {
+        precisionFiltered = adjacentEvidenceOnly;
+        minScore = 50;
+        poolUsed = "niche-adjacent-evidence";
+      }
+    }
+
+    const finalItems = (role ? precisionFiltered : precisionFiltered.length ? precisionFiltered : scored).slice(
       0,
       Math.max(1, Math.min(80, limit)),
     );
+    const sorted = finalItems.map((item) => item.job);
+    const strictNoResults = strictRoleRequested && sorted.length === 0;
 
     return NextResponse.json({
       source: "US job sites (Greenhouse + Lever)",
@@ -649,8 +818,19 @@ export async function GET(request: NextRequest) {
       totalRoleMatched: byRole.length,
       totalRoleAdjacent: byRoleAdjacent.length,
       totalBandMatched: byBand.length,
+      poolUsed,
       minScoreApplied: minScore,
       totalAfterPrecisionFilter: precisionFiltered.length,
+      noResultsReason: strictNoResults
+        ? "За последние 7 дней в подключённых US-источниках не найдено вакансий с достаточным ролевым доказательством."
+        : undefined,
+      suggestedRoleHints: strictNoResults
+        ? [
+            "Попробуйте смежные роли: People Operations, HR Business Partner, Global Benefits.",
+            "Расширьте окно поиска до 14 дней.",
+            "Оставьте US и размер компании, но ослабьте формулировку role до доменной.",
+          ]
+        : undefined,
       jobs: sorted,
     });
   } catch (error) {

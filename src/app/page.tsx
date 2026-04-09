@@ -72,6 +72,14 @@ type JobsApiItem = {
   linkedinTargetRole?: string;
   linkedinSearchUrl?: string;
   outreachTip?: string;
+  fitSignals?: string[];
+  fitRisks?: string[];
+};
+
+type JobsApiPayload = {
+  jobs: JobsApiItem[];
+  noResultsReason?: string;
+  suggestedRoleHints?: string[];
 };
  
 const CANDIDATE_LEVEL_OPTIONS: { value: CandidateLevel; label: string }[] = [
@@ -227,6 +235,7 @@ export default function Home() {
   const [dragActive, setDragActive] = useState(false);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [analysisError, setAnalysisError] = useState<string>("");
+  const [analysisHintLines, setAnalysisHintLines] = useState<string[]>([]);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const activeClient = useMemo(
@@ -368,6 +377,7 @@ export default function Home() {
     if (!activeClient) return;
     setIsAnalyzing(true);
     setAnalysisError("");
+    setAnalysisHintLines([]);
     try {
       const params = new URLSearchParams({
         role: activeClient.targetRole || "",
@@ -384,7 +394,7 @@ export default function Home() {
         throw new Error(`API returned status ${response.status}`);
       }
 
-      const payload = (await response.json()) as { jobs: JobsApiItem[] };
+      const payload = (await response.json()) as JobsApiPayload;
       const jobs: Job[] = payload.jobs.map((item, index) => ({
         ...item,
         contactStatus: item.linkedinSearchUrl ? "Потенциальный контакт" : "Не найден",
@@ -399,6 +409,10 @@ export default function Home() {
         jobs,
         lastAnalyzedAt: new Date().toISOString().slice(0, 10),
       });
+      if (!jobs.length && payload.noResultsReason) {
+        setAnalysisError(payload.noResultsReason);
+        setAnalysisHintLines(payload.suggestedRoleHints || []);
+      }
       setGeneratedReport("");
       setIsReportOpen(false);
     } catch (error) {
@@ -592,7 +606,14 @@ export default function Home() {
               <div className="mt-4 space-y-4">
                 {analysisError ? (
                   <div className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">
-                    {analysisError}
+                    <p>{analysisError}</p>
+                    {analysisHintLines.length ? (
+                      <ul className="mt-2 list-disc space-y-1 pl-5 text-xs text-rose-700/90">
+                        {analysisHintLines.map((hint, idx) => (
+                          <li key={`${hint}-${idx}`}>{hint}</li>
+                        ))}
+                      </ul>
+                    ) : null}
                   </div>
                 ) : null}
                 <div
