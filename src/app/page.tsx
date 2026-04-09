@@ -1,6 +1,6 @@
 "use client";
 
-import { ChangeEvent, DragEvent, useMemo, useRef, useState } from "react";
+import { ChangeEvent, DragEvent, useEffect, useMemo, useRef, useState } from "react";
 
 type ContactStatus = "Не найден" | "Потенциальный контакт" | "Контакт подтверждён";
 type OutreachStatus =
@@ -82,6 +82,9 @@ const COMPANY_SIZE_OPTIONS: { value: CompanySize; label: string }[] = [
   { value: "enterprise", label: "Корпорация (1000+)" },
 ];
 
+const CLIENTS_STORAGE_KEY = "roleradar.clients.v1";
+const ACTIVE_CLIENT_STORAGE_KEY = "roleradar.active-client-id.v1";
+
 const INITIAL_CLIENTS: Client[] = [
   {
     id: "c1",
@@ -113,6 +116,77 @@ const INITIAL_CLIENTS: Client[] = [
   },
 ];
 
+function parseCandidateLevel(value: unknown): CandidateLevel {
+  if (value === "junior" || value === "middle" || value === "senior" || value === "auto") {
+    return value;
+  }
+  return "auto";
+}
+
+function parseCompanySizes(value: unknown): CompanySize[] {
+  const allowed: CompanySize[] = ["startup", "scaleup", "enterprise"];
+  if (!Array.isArray(value)) return [...allowed];
+  const parsed = value.filter((size): size is CompanySize => allowed.includes(size as CompanySize));
+  return parsed.length ? parsed : [...allowed];
+}
+
+function normalizeClient(raw: unknown, index: number): Client | null {
+  if (!raw || typeof raw !== "object") return null;
+  const client = raw as Partial<Client>;
+  if (!client.id || !client.name) return null;
+
+  return {
+    id: String(client.id || `c-restored-${index}`),
+    name: String(client.name || `Клиент ${index + 1}`),
+    resume: String(client.resume || ""),
+    resumeFileName: client.resumeFileName ? String(client.resumeFileName) : undefined,
+    targetRole: String(client.targetRole || ""),
+    location: String(client.location || ""),
+    experienceYears: String(client.experienceYears || "3"),
+    candidateLevel: parseCandidateLevel(client.candidateLevel),
+    preferredCompanySizes: parseCompanySizes(client.preferredCompanySizes),
+    detectedBand:
+      client.detectedBand === "junior" ||
+      client.detectedBand === "middle" ||
+      client.detectedBand === "senior"
+        ? client.detectedBand
+        : undefined,
+    detectedExperienceYears:
+      typeof client.detectedExperienceYears === "number"
+        ? client.detectedExperienceYears
+        : undefined,
+    jobs: Array.isArray(client.jobs) ? client.jobs : [],
+    lastAnalyzedAt: client.lastAnalyzedAt ? String(client.lastAnalyzedAt) : undefined,
+  };
+}
+
+function loadClientsFromStorage(): Client[] {
+  if (typeof window === "undefined") return INITIAL_CLIENTS;
+  try {
+    const raw = window.localStorage.getItem(CLIENTS_STORAGE_KEY);
+    if (!raw) return INITIAL_CLIENTS;
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return INITIAL_CLIENTS;
+    const restored = parsed
+      .map((item, index) => normalizeClient(item, index))
+      .filter((item): item is Client => item !== null);
+    return restored.length ? restored : INITIAL_CLIENTS;
+  } catch {
+    return INITIAL_CLIENTS;
+  }
+}
+
+function loadActiveClientIdFromStorage(clients: Client[]): string {
+  if (typeof window === "undefined") return clients[0]?.id || "";
+  try {
+    const stored = window.localStorage.getItem(ACTIVE_CLIENT_STORAGE_KEY);
+    if (stored && clients.some((client) => client.id === stored)) return stored;
+  } catch {
+    // ignore and fallback
+  }
+  return clients[0]?.id || "";
+}
+
 function todayRu(): string {
   return new Intl.DateTimeFormat("ru-RU", {
     day: "2-digit",
@@ -138,8 +212,10 @@ function metricTone(index: number): string {
 }
 
 export default function Home() {
-  const [clients, setClients] = useState<Client[]>(INITIAL_CLIENTS);
-  const [activeClientId, setActiveClientId] = useState<string>(INITIAL_CLIENTS[0].id);
+  const [clients, setClients] = useState<Client[]>(() => loadClientsFromStorage());
+  const [activeClientId, setActiveClientId] = useState<string>(() =>
+    loadActiveClientIdFromStorage(loadClientsFromStorage()),
+  );
   const [newClientName, setNewClientName] = useState<string>("");
   const [generatedReport, setGeneratedReport] = useState<string>("");
   const [isReportOpen, setIsReportOpen] = useState(false);
@@ -152,6 +228,24 @@ export default function Home() {
     () => clients.find((client) => client.id === activeClientId),
     [activeClientId, clients],
   );
+
+  useEffect(() => {
+    if (!clients.length) return;
+    if (!clients.some((client) => client.id === activeClientId)) {
+      setActiveClientId(clients[0].id);
+    }
+  }, [clients, activeClientId]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(CLIENTS_STORAGE_KEY, JSON.stringify(clients));
+  }, [clients]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (!activeClientId) return;
+    window.localStorage.setItem(ACTIVE_CLIENT_STORAGE_KEY, activeClientId);
+  }, [activeClientId]);
 
   const pipelineSummary = useMemo(() => {
     if (!activeClient) {
