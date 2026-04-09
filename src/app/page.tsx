@@ -9,6 +9,8 @@ type OutreachStatus =
   | "Готов к отправке"
   | "Отправлено"
   | "Нужен follow-up";
+type CandidateLevel = "auto" | "junior" | "middle" | "senior";
+type CompanySize = "startup" | "scaleup" | "enterprise";
 
 type Job = {
   id: string;
@@ -32,6 +34,11 @@ type Client = {
   resumeFileName?: string;
   targetRole: string;
   location: string;
+  experienceYears: string;
+  candidateLevel: CandidateLevel;
+  preferredCompanySizes: CompanySize[];
+  detectedBand?: Exclude<CandidateLevel, "auto">;
+  detectedExperienceYears?: number | null;
   jobs: Job[];
   lastAnalyzedAt?: string;
 };
@@ -60,6 +67,19 @@ type JobsApiItem = {
   source: string;
   applyUrl: string;
 };
+ 
+const CANDIDATE_LEVEL_OPTIONS: { value: CandidateLevel; label: string }[] = [
+  { value: "auto", label: "Авто (по резюме)" },
+  { value: "junior", label: "Junior" },
+  { value: "middle", label: "Middle" },
+  { value: "senior", label: "Senior" },
+];
+
+const COMPANY_SIZE_OPTIONS: { value: CompanySize; label: string }[] = [
+  { value: "startup", label: "Стартап (до 200)" },
+  { value: "scaleup", label: "Scale-up (200–1000)" },
+  { value: "enterprise", label: "Корпорация (1000+)" },
+];
 
 const INITIAL_CLIENTS: Client[] = [
   {
@@ -70,6 +90,9 @@ const INITIAL_CLIENTS: Client[] = [
     resumeFileName: "anna-kuznetsova-cv.pdf",
     targetRole: "Senior Product Manager",
     location: "Miami, FL",
+    experienceYears: "8",
+    candidateLevel: "auto",
+    preferredCompanySizes: ["startup", "scaleup"],
     jobs: [],
     lastAnalyzedAt: "2026-04-08",
   },
@@ -81,6 +104,9 @@ const INITIAL_CLIENTS: Client[] = [
     resumeFileName: "ilya-petrov-resume.docx",
     targetRole: "Senior Backend Engineer",
     location: "Austin, TX",
+    experienceYears: "6",
+    candidateLevel: "auto",
+    preferredCompanySizes: ["startup", "scaleup", "enterprise"],
     jobs: [],
     lastAnalyzedAt: "2026-04-07",
   },
@@ -176,6 +202,9 @@ export default function Home() {
       resume: "",
       targetRole: "",
       location: "",
+      candidateLevel: "auto",
+      experienceYears: "3",
+      preferredCompanySizes: ["startup", "scaleup", "enterprise"],
       jobs: [],
     };
 
@@ -243,6 +272,9 @@ export default function Home() {
       const params = new URLSearchParams({
         role: activeClient.targetRole || "",
         location: activeClient.location || "",
+        resume: activeClient.resume || "",
+        candidateLevel: activeClient.candidateLevel,
+        companySizes: activeClient.preferredCompanySizes.join(","),
       });
       const response = await fetch(`/api/jobs?${params.toString()}`);
       if (!response.ok) {
@@ -541,6 +573,56 @@ export default function Home() {
                     placeholder="Например, Miami, FL"
                     className="h-11 w-full rounded-xl border border-slate-300 px-3 text-sm outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-100"
                   />
+                </div>
+                <div>
+                  <label className="mb-1 block text-sm font-medium">Уровень кандидата</label>
+                  <select
+                    value={activeClient.candidateLevel}
+                    onChange={(e) =>
+                      updateActiveClient({
+                        candidateLevel: e.target.value as CandidateLevel,
+                      })
+                    }
+                    className="h-11 w-full rounded-xl border border-slate-300 px-3 text-sm outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-100"
+                  >
+                    {CANDIDATE_LEVEL_OPTIONS.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <p className="mb-2 block text-sm font-medium">Размер компаний</p>
+                  <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+                    {COMPANY_SIZE_OPTIONS.map((option) => {
+                      const checked = activeClient.preferredCompanySizes.includes(option.value);
+                      return (
+                        <label
+                          key={option.value}
+                          className={`flex cursor-pointer items-center gap-2 rounded-xl border px-3 py-2 text-sm transition ${
+                            checked
+                              ? "border-blue-300 bg-blue-50 text-blue-900"
+                              : "border-slate-300 bg-white text-slate-700 hover:border-slate-400"
+                          }`}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={(e) => {
+                              const next = e.target.checked
+                                ? [...activeClient.preferredCompanySizes, option.value]
+                                : activeClient.preferredCompanySizes.filter((size) => size !== option.value);
+                              if (!next.length) return;
+                              updateActiveClient({ preferredCompanySizes: next });
+                            }}
+                            className="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-300"
+                          />
+                          <span>{option.label}</span>
+                        </label>
+                      );
+                    })}
+                  </div>
                 </div>
                 <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-sm text-slate-600">
                   Последний анализ:{" "}
