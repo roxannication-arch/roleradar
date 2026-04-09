@@ -21,6 +21,8 @@ type Job = {
   likelyContact: string;
   contactConfidence: number;
   outreachStatus: OutreachStatus;
+  source: string;
+  applyUrl: string;
 };
 
 type Client = {
@@ -48,53 +50,16 @@ const OUTREACH_STATUS_OPTIONS: OutreachStatus[] = [
   "Нужен follow-up",
 ];
 
-const MOCK_COMPANIES = [
-  "Yandex",
-  "Tinkoff",
-  "Avito",
-  "VK",
-  "Miro",
-  "Ozon",
-  "Skyeng",
-  "Cian",
-  "Sber",
-  "Lamoda",
-];
-
-const FIT_REASONS = [
-  "Сильный опыт в схожем домене и подтверждённый стек под требования роли.",
-  "Профиль кандидата совпадает с ключевыми зонами ответственности позиции.",
-  "Есть релевантный опыт запуска и сопровождения похожих продуктовых инициатив.",
-  "Уровень seniority и стиль управления задачами соответствуют hiring brief.",
-  "Хороший баланс hard/soft навыков для команды и бизнес-контекста вакансии.",
-];
-
-function createMockJobs(targetRole: string, location: string): Job[] {
-  const cleanRole = targetRole.trim() || "Product Manager";
-  const cleanLocation = location.trim() || "Москва";
-
-  return Array.from({ length: 8 }, (_, index) => {
-    const company = MOCK_COMPANIES[index % MOCK_COMPANIES.length];
-    const score = Math.max(58, 93 - index * 4);
-    const contactReady = index < 4;
-    const hasContact = index < 6;
-
-    return {
-      id: `${company}-${index}`,
-      title: `${cleanRole} • ${index < 3 ? "Core" : "Growth"}`,
-      company,
-      location: cleanLocation,
-      matchScore: score,
-      fitReason: FIT_REASONS[index % FIT_REASONS.length],
-      contactStatus: hasContact ? "Потенциальный контакт" : "Не найден",
-      likelyContact: hasContact
-        ? `${index % 2 === 0 ? "Senior Recruiter" : "Hiring Manager"} ${company}`
-        : "",
-      contactConfidence: hasContact ? 62 + (index % 4) * 9 : 0,
-      outreachStatus: contactReady ? "Готов к отправке" : "Черновик",
-    };
-  });
-}
+type JobsApiItem = {
+  id: string;
+  title: string;
+  company: string;
+  location: string;
+  matchScore: number;
+  fitReason: string;
+  source: string;
+  applyUrl: string;
+};
 
 const INITIAL_CLIENTS: Client[] = [
   {
@@ -104,8 +69,8 @@ const INITIAL_CLIENTS: Client[] = [
       "8 лет в продукте: growth, аналитика, запуск B2C фич, кросс-функциональные команды.",
     resumeFileName: "anna-kuznetsova-cv.pdf",
     targetRole: "Senior Product Manager",
-    location: "Москва",
-    jobs: createMockJobs("Senior Product Manager", "Москва"),
+    location: "Miami, FL",
+    jobs: [],
     lastAnalyzedAt: "2026-04-08",
   },
   {
@@ -115,8 +80,8 @@ const INITIAL_CLIENTS: Client[] = [
       "Backend инженер, Python/Go, микросервисы, high-load, DevOps и процессы CI/CD.",
     resumeFileName: "ilya-petrov-resume.docx",
     targetRole: "Senior Backend Engineer",
-    location: "Санкт-Петербург",
-    jobs: createMockJobs("Senior Backend Engineer", "Санкт-Петербург"),
+    location: "Austin, TX",
+    jobs: [],
     lastAnalyzedAt: "2026-04-07",
   },
 ];
@@ -153,6 +118,7 @@ export default function Home() {
   const [isReportOpen, setIsReportOpen] = useState(false);
   const [dragActive, setDragActive] = useState(false);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [analysisError, setAnalysisError] = useState<string>("");
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const activeClient = useMemo(
@@ -272,15 +238,40 @@ export default function Home() {
   async function runAnalysis() {
     if (!activeClient) return;
     setIsAnalyzing(true);
-    await new Promise((resolve) => setTimeout(resolve, 500));
-    const jobs = createMockJobs(activeClient.targetRole, activeClient.location);
-    updateActiveClient({
-      jobs,
-      lastAnalyzedAt: new Date().toISOString().slice(0, 10),
-    });
-    setGeneratedReport("");
-    setIsReportOpen(false);
-    setIsAnalyzing(false);
+    setAnalysisError("");
+    try {
+      const params = new URLSearchParams({
+        role: activeClient.targetRole || "",
+        location: activeClient.location || "",
+      });
+      const response = await fetch(`/api/jobs?${params.toString()}`);
+      if (!response.ok) {
+        throw new Error(`API returned status ${response.status}`);
+      }
+
+      const payload = (await response.json()) as { jobs: JobsApiItem[] };
+      const jobs: Job[] = payload.jobs.map((item, index) => ({
+        ...item,
+        contactStatus: index < 4 ? "Потенциальный контакт" : "Не найден",
+        likelyContact: index < 4 ? `Recruiter ${item.company}` : "",
+        contactConfidence: index < 4 ? 65 + (index % 3) * 10 : 0,
+        outreachStatus: index < 3 ? "Готов к отправке" : "Черновик",
+      }));
+
+      updateActiveClient({
+        jobs,
+        lastAnalyzedAt: new Date().toISOString().slice(0, 10),
+      });
+      setGeneratedReport("");
+      setIsReportOpen(false);
+    } catch (error) {
+      console.error(error);
+      setAnalysisError(
+        "Не удалось загрузить вакансии с US job-сайтов. Проверьте роль/локацию и попробуйте снова.",
+      );
+    } finally {
+      setIsAnalyzing(false);
+    }
   }
 
   function generateReport() {
@@ -297,6 +288,8 @@ export default function Home() {
       `Целевая роль: ${activeClient.targetRole || "Не указана"}`,
       `Локация: ${activeClient.location || "Не указана"}`,
       `Резюме: ${activeClient.resumeFileName || "текстовая версия"}`,
+      "",
+      "Источник данных: реальные вакансии с американских job sites (Greenhouse boards).",
       "",
       "Операционная сводка:",
       `- Вакансий найдено: ${pipelineSummary.jobsFound}`,
@@ -428,6 +421,9 @@ export default function Home() {
                   {activeClient.targetRole || "Роль не задана"} ·{" "}
                   {activeClient.location || "Локация не задана"}
                 </p>
+                <p className="mt-1 text-xs text-slate-400">
+                  Регион поиска: США · Источник вакансий: американские job boards
+                </p>
               </div>
               <div className="flex items-center gap-2">
                 <button
@@ -457,6 +453,11 @@ export default function Home() {
               </p>
 
               <div className="mt-4 space-y-4">
+                {analysisError ? (
+                  <div className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">
+                    {analysisError}
+                  </div>
+                ) : null}
                 <div
                   onDragOver={(event) => {
                     event.preventDefault();
@@ -537,7 +538,7 @@ export default function Home() {
                   <input
                     value={activeClient.location}
                     onChange={(e) => updateActiveClient({ location: e.target.value })}
-                    placeholder="Например, Москва"
+                    placeholder="Например, Miami, FL"
                     className="h-11 w-full rounded-xl border border-slate-300 px-3 text-sm outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-100"
                   />
                 </div>
@@ -609,6 +610,9 @@ export default function Home() {
                         <p className="text-sm text-slate-500">
                           {job.company} · {job.location}
                         </p>
+                        <p className="mt-1 text-xs text-slate-400">
+                          Источник: {job.source}
+                        </p>
                       </div>
                       <span
                         className={`rounded-full border px-3 py-1 text-xs font-semibold ${scoreTone(
@@ -620,6 +624,14 @@ export default function Home() {
                     </div>
 
                     <p className="mt-3 text-sm text-slate-700">{job.fitReason}</p>
+                    <a
+                      href={job.applyUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="mt-2 inline-flex text-xs font-semibold text-blue-700 underline decoration-blue-300 underline-offset-2 hover:text-blue-800"
+                    >
+                      Открыть вакансию на сайте
+                    </a>
 
                     <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
                       <div>
