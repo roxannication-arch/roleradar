@@ -23,6 +23,17 @@ type LeverJob = {
 type SeniorityBand = "junior" | "middle" | "senior";
 type CompanySizeBand = "startup" | "scaleup" | "enterprise";
 
+type MatchContext = {
+  roleTokens: string[];
+  matchedRoleTokens: string[];
+  matchedRoleConcepts: string[];
+  resumeSkillsMatched: string[];
+  locationMatched: boolean;
+  seniorityMatched: boolean;
+  penalties: string[];
+  baseRoleScore: number;
+};
+
 type RealJob = {
   id: string;
   title: string;
@@ -34,6 +45,8 @@ type RealJob = {
   companySize: CompanySizeBand;
   matchScore: number;
   fitReason: string;
+  fitSignals: string[];
+  fitRisks: string[];
   linkedinTargetRole: string;
   linkedinSearchUrl: string;
   outreachTip: string;
@@ -90,9 +103,58 @@ const US_GREENHOUSE_BOARDS: BoardConfig[] = [
   { slug: "cloudflare", company: "Cloudflare", size: "enterprise" },
 ];
 
-const US_LEVER_BOARDS: BoardConfig[] = [
-  { slug: "mindtickle", company: "Mindtickle", size: "scaleup" },
+const US_LEVER_BOARDS: BoardConfig[] = [{ slug: "mindtickle", company: "Mindtickle", size: "scaleup" }];
+
+const SKILL_KEYWORDS = [
+  "product",
+  "growth",
+  "analytics",
+  "sql",
+  "python",
+  "react",
+  "node",
+  "typescript",
+  "go",
+  "java",
+  "aws",
+  "gcp",
+  "azure",
+  "kubernetes",
+  "devops",
+  "ml",
+  "ai",
+  "data",
+  "security",
+  "sales",
+  "marketing",
+  "finance",
+  "operations",
+  "hr",
+  "talent",
+  "recruiting",
+  "mobility",
 ];
+
+const ROLE_SYNONYMS: Record<string, string[]> = {
+  mobility: ["mobility", "relocation", "immigration"],
+  recruiter: ["recruiter", "recruiting", "talent", "sourcer"],
+  backend: ["backend", "api", "platform", "server"],
+  frontend: ["frontend", "ui", "web", "react"],
+  product: ["product", "pm"],
+  engineer: ["engineer", "engineering", "developer"],
+};
+
+function expandRoleConcepts(tokens: string[]): string[] {
+  const expanded: string[] = [];
+  for (const token of tokens) {
+    expanded.push(token);
+    const synonyms = ROLE_SYNONYMS[token];
+    if (synonyms?.length) {
+      expanded.push(...synonyms);
+    }
+  }
+  return unique(expanded);
+}
 
 function normalize(value: string): string {
   return value.toLowerCase().trim();
@@ -103,6 +165,10 @@ function tokenize(text: string): string[] {
     .replace(/[^a-z0-9\s]/g, " ")
     .split(/\s+/)
     .filter((token) => token.length > 2);
+}
+
+function unique<T>(arr: T[]): T[] {
+  return [...new Set(arr)];
 }
 
 function roleIntentTokens(role: string): string[] {
@@ -154,7 +220,7 @@ function roleAdjacentMatch(title: string, role: string): boolean {
   if (!roleTokens.length) return false;
 
   if (roleTokens.includes("mobility")) {
-    const positive = ["mobility", "immigration", "relocation", "people", "hr", "talent"];
+    const positive = ["mobility", "immigration", "relocation"];
     const negative = ["supply", "procurement", "logistics", "warehouse"];
     return positive.some((word) => t.includes(word)) && !negative.some((word) => t.includes(word));
   }
@@ -175,12 +241,7 @@ function seniorityFromTitle(title: string): SeniorityBand {
   ) {
     return "senior";
   }
-  if (
-    t.includes("junior") ||
-    t.includes("entry") ||
-    t.includes("associate") ||
-    t.includes("intern")
-  ) {
+  if (t.includes("junior") || t.includes("entry") || t.includes("associate") || t.includes("intern")) {
     return "junior";
   }
   return "middle";
@@ -203,20 +264,10 @@ function estimateCandidateBand(
     return "senior";
   }
 
-  if (
-    text.includes("intern") ||
-    text.includes("стаж") ||
-    text.includes("entry level") ||
-    text.includes("junior")
-  ) {
+  if (text.includes("intern") || text.includes("стаж") || text.includes("entry level") || text.includes("junior")) {
     return "junior";
   }
-  if (
-    text.includes("senior") ||
-    text.includes("lead") ||
-    text.includes("руковод") ||
-    text.includes("staff")
-  ) {
+  if (text.includes("senior") || text.includes("lead") || text.includes("руковод") || text.includes("staff")) {
     return "senior";
   }
   return "middle";
@@ -250,63 +301,113 @@ function linkedinSearchUrl(company: string, role: string, location: string): str
   return `https://www.google.com/search?q=${query}`;
 }
 
-function scoreJobMatch(
+function extractResumeSkills(resumeText: string): string[] {
+  const lower = normalize(resumeText);
+  return SKILL_KEYWORDS.filter((skill) => lower.includes(skill));
+}
+
+function buildMatchContext(
   title: string,
   role: string,
   location: string,
   jobLocation: string,
   candidateBand: SeniorityBand,
-): number {
+  resumeSkills: string[],
+): MatchContext {
   const normalizedTitle = normalize(title);
   const normalizedRole = normalize(role);
   const normalizedLocation = normalize(location);
   const normalizedJobLocation = normalize(jobLocation);
 
-  let score = 55;
-  if (normalizedRole && normalizedTitle.includes(normalizedRole)) score += 30;
-  else {
-    const roleWords = roleIntentTokens(role);
-    const overlaps = roleWords.filter((word) => normalizedTitle.includes(word)).length;
-    score += Math.min(18, overlaps * 7);
-    if (roleWords.length && overlaps === roleWords.length) score += 8;
+  const roleTokens = roleIntentTokens(role);
+  const roleConcepts = expandRoleConcepts(roleTokens);
+  const matchedRoleTokens = roleTokens.filter((token) => normalizedTitle.includes(token));
+  const matchedRoleConcepts = roleConcepts.filter((concept) => normalizedTitle.includes(concept));
+
+  let baseRoleScore = 0;
+  if (normalizedRole && normalizedTitle.includes(normalizedRole)) {
+    baseRoleScore += 42;
+  } else if (roleTokens.length) {
+    baseRoleScore += Math.min(30, matchedRoleTokens.length * 10);
+    if (matchedRoleTokens.length === roleTokens.length) baseRoleScore += 10;
+    baseRoleScore += Math.min(8, matchedRoleConcepts.length * 2);
+  } else {
+    baseRoleScore += 12;
   }
 
-  if (!normalizedLocation) score += 8;
-  if (
-    normalizedLocation &&
-    (normalizedJobLocation.includes(normalizedLocation) ||
-      normalizedJobLocation.includes("remote") ||
-      normalizedJobLocation.includes("united states") ||
-      normalizedJobLocation.includes("us"))
-  ) {
-    score += 10;
+  const resumeSkillsMatched = resumeSkills.filter((skill) => normalizedTitle.includes(skill));
+  const locationMatched =
+    !normalizedLocation ||
+    normalizedJobLocation.includes(normalizedLocation) ||
+    normalizedJobLocation.includes("remote") ||
+    normalizedJobLocation.includes("united states") ||
+    normalizedJobLocation.includes("us");
+  const seniorityMatched = seniorityFromTitle(title) === candidateBand;
+
+  const penalties: string[] = [];
+  if (roleTokens.length >= 2 && matchedRoleTokens.length < Math.ceil(roleTokens.length / 2)) {
+    penalties.push("low-role-token-overlap");
+  }
+  if (!locationMatched) penalties.push("location-mismatch");
+  if (!seniorityMatched && candidateBand === "junior" && seniorityFromTitle(title) === "senior") {
+    penalties.push("seniority-gap");
   }
 
-  const band = seniorityFromTitle(title);
-  if (band === candidateBand) score += 10;
-  if (candidateBand === "junior" && band === "middle") score += 2;
-  if (candidateBand === "middle" && band === "junior") score += 1;
-  if (candidateBand === "middle" && band === "senior") score -= 8;
-  if (candidateBand === "junior" && band === "senior") score -= 20;
+  return {
+    roleTokens,
+    matchedRoleConcepts: unique(matchedRoleConcepts),
+    matchedRoleTokens,
+    resumeSkillsMatched: unique(resumeSkillsMatched),
+    locationMatched,
+    seniorityMatched,
+    penalties,
+    baseRoleScore,
+  };
+}
 
-  return Math.max(40, Math.min(98, score));
+function scoreJobMatch(context: MatchContext, candidateBand: SeniorityBand): number {
+  let score = 35 + context.baseRoleScore;
+
+  score += Math.min(10, context.matchedRoleConcepts.length * 3);
+  score += Math.min(18, context.resumeSkillsMatched.length * 6);
+  if (context.locationMatched) score += 8;
+  if (context.seniorityMatched) score += 8;
+
+  if (candidateBand === "junior" && !context.seniorityMatched) score -= 16;
+  if (context.penalties.includes("low-role-token-overlap")) score -= 14;
+  if (context.penalties.includes("location-mismatch")) score -= 6;
+  if (context.penalties.includes("seniority-gap")) score -= 12;
+
+  return Math.max(30, Math.min(99, score));
 }
 
 function buildFitReason(
-  title: string,
   role: string,
   location: string,
   candidateBand: SeniorityBand,
+  context: MatchContext,
 ): string {
-  const roleHint = role ? `по роли "${role}"` : "по заданной роли";
-  const locationHint = location ? `локации (${location})` : "географии/remote формату";
-  const bandHint =
-    candidateBand === "junior"
-      ? "junior-профилю"
-      : candidateBand === "middle"
-        ? "middle-профилю"
-        : "senior-профилю";
-  return `Роль "${title}" релевантна ${roleHint}, ${locationHint} и соответствует ${bandHint} клиента.`;
+  const rolePart =
+    context.matchedRoleTokens.length > 0
+      ? `Совпали ключевые сигналы роли: ${context.matchedRoleTokens.join(", ")}.`
+      : context.matchedRoleConcepts.length > 0
+        ? `Точных токенов роли нет, но совпали смысловые маркеры: ${context.matchedRoleConcepts.join(", ")}.`
+        : `Точное совпадение роли не найдено, матч построен по смежным признакам.`;
+
+  const skillsPart = context.resumeSkillsMatched.length
+    ? `Из резюме совпали навыки/домены: ${context.resumeSkillsMatched.join(", ")}.`
+    : `Явных совпадений навыков из резюме в тайтле вакансии нет.`;
+
+  const geoPart = context.locationMatched
+    ? `Локация релевантна запросу (${location || "US/remote"}).`
+    : `Локация не полностью совпадает с запросом (${location || "US/remote"}).`;
+
+  const seniorityPart = context.seniorityMatched
+    ? `Уровень вакансии совпадает с профилем клиента (${candidateBand}).`
+    : `Уровень вакансии частично расходится с профилем клиента (${candidateBand}).`;
+
+  const roleHint = role ? `Запрос: "${role}".` : "Роль не указана явно.";
+  return `${roleHint} ${rolePart} ${skillsPart} ${geoPart} ${seniorityPart}`;
 }
 
 function isLikelyUSLocation(raw: string): boolean {
@@ -352,7 +453,6 @@ async function fetchGreenhouseBoardJobs(board: BoardConfig): Promise<RealJob[]> 
   });
 
   if (!response.ok) return [];
-
   const payload = (await response.json()) as GreenhouseResponse;
   const jobs = payload.jobs ?? [];
 
@@ -370,9 +470,11 @@ async function fetchGreenhouseBoardJobs(board: BoardConfig): Promise<RealJob[]> 
       companySize: board.size,
       matchScore: 0,
       fitReason: "",
+      fitSignals: [],
+      fitRisks: [],
       linkedinTargetRole: targetRole,
       linkedinSearchUrl: linkedinSearchUrl(board.company, targetRole, location),
-      outreachTip: `Найдите в LinkedIn: ${targetRole} в ${board.company}. Сфокусируйтесь на людях из Talent Acquisition / Recruiting Team.`,
+      outreachTip: `Найдите в LinkedIn: ${targetRole} в ${board.company}. Сфокусируйтесь на Talent Acquisition / Recruiting Team.`,
     };
   });
 }
@@ -387,6 +489,7 @@ async function fetchLeverBoardJobs(board: BoardConfig): Promise<RealJob[]> {
     cache: "no-store",
   });
   if (!response.ok) return [];
+
   const jobs = (await response.json()) as LeverJob[];
   return jobs.map((job) => {
     const title = job.text || "Untitled role";
@@ -403,9 +506,11 @@ async function fetchLeverBoardJobs(board: BoardConfig): Promise<RealJob[]> {
       companySize: board.size,
       matchScore: 0,
       fitReason: "",
+      fitSignals: [],
+      fitRisks: [],
       linkedinTargetRole: targetRole,
       linkedinSearchUrl: linkedinSearchUrl(board.company, targetRole, location),
-      outreachTip: `Напишите ${targetRole} в ${board.company} с коротким value pitch и ссылкой на профиль.`,
+      outreachTip: `Напишите ${targetRole} в ${board.company} с коротким value pitch и ссылкой на релевантный кейс.`,
     };
   });
 }
@@ -433,12 +538,13 @@ export async function GET(request: NextRequest) {
   const daysWindow = Math.max(1, Math.min(30, Number.isNaN(daysWindowRaw) ? 7 : daysWindowRaw));
   const cutoffDate = new Date(Date.now() - daysWindow * 24 * 60 * 60 * 1000);
   const experienceYears = parseExperienceYears(request.nextUrl.searchParams.get("experienceYears"));
-  const resumeText = request.nextUrl.searchParams.get("resumeText")?.slice(0, 2500) || "";
+  const resumeText = request.nextUrl.searchParams.get("resumeText")?.slice(0, 4000) || "";
   const candidateBand = estimateCandidateBand(
     experienceYears,
     resumeText,
     request.nextUrl.searchParams.get("candidateBand") || undefined,
   );
+  const resumeSkills = extractResumeSkills(resumeText);
 
   try {
     const [greenhouseSettled, leverSettled] = await Promise.all([
@@ -473,7 +579,6 @@ export async function GET(request: NextRequest) {
       return true;
     });
 
-    // Progressive fallback to keep meaningful volume while preserving relevance.
     const pool = strictRoleRequested
       ? byBand.length
         ? byBand
@@ -488,17 +593,46 @@ export async function GET(request: NextRequest) {
             ? byCompanySize
             : recentOnly;
 
-    const sorted = pool
+    const scored = pool
       .map((job) => {
-        const score = scoreJobMatch(job.title, role, location, job.location, candidateBand);
+        const context = buildMatchContext(
+          job.title,
+          role,
+          location,
+          job.location,
+          candidateBand,
+          resumeSkills,
+        );
+        const score = scoreJobMatch(context, candidateBand);
         return {
           ...job,
-          matchScore: Math.max(40, score),
-          fitReason: buildFitReason(job.title, role, location, candidateBand),
+          matchScore: score,
+          fitReason: buildFitReason(role, location, candidateBand, context),
+          fitSignals: [
+            context.matchedRoleTokens.length
+              ? `Роль: ${context.matchedRoleTokens.join(", ")}`
+              : context.matchedRoleConcepts.length
+                ? `Семантика роли: ${context.matchedRoleConcepts.join(", ")}`
+                : "Роль: слабое совпадение",
+            context.resumeSkillsMatched.length
+              ? `Навыки из резюме: ${context.resumeSkillsMatched.join(", ")}`
+              : "Навыки из резюме: прямых совпадений нет",
+            context.locationMatched ? "Локация: совпадает" : "Локация: частичное совпадение",
+            context.seniorityMatched
+              ? `Уровень: совпадает (${candidateBand})`
+              : `Уровень: частичное расхождение (${candidateBand})`,
+          ],
+          fitRisks: context.penalties,
         };
       })
-      .sort((a, b) => b.matchScore - a.matchScore)
-      .slice(0, Math.max(1, Math.min(80, limit)));
+      .sort((a, b) => b.matchScore - a.matchScore);
+
+    const minScore = role ? 58 : 45;
+    const precisionFiltered = scored.filter((job) => job.matchScore >= minScore);
+    const sorted = (role ? precisionFiltered : precisionFiltered.length ? precisionFiltered : scored).slice(
+      0,
+      Math.max(1, Math.min(80, limit)),
+    );
 
     return NextResponse.json({
       source: "US job sites (Greenhouse + Lever)",
@@ -507,6 +641,7 @@ export async function GET(request: NextRequest) {
       candidateBand,
       companySizes,
       daysWindow,
+      extractedResumeSkills: resumeSkills,
       totalFetched: fetched.length,
       totalUS: usOnly.length,
       totalRecent: recentOnly.length,
@@ -514,6 +649,8 @@ export async function GET(request: NextRequest) {
       totalRoleMatched: byRole.length,
       totalRoleAdjacent: byRoleAdjacent.length,
       totalBandMatched: byBand.length,
+      minScoreApplied: minScore,
+      totalAfterPrecisionFilter: precisionFiltered.length,
       jobs: sorted,
     });
   } catch (error) {

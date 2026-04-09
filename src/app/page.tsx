@@ -19,6 +19,8 @@ type Job = {
   location: string;
   matchScore: number;
   fitReason: string;
+  matchSignals?: string[];
+  matchWarnings?: string[];
   contactStatus: ContactStatus;
   likelyContact: string;
   contactConfidence: number;
@@ -62,6 +64,8 @@ type JobsApiItem = {
   location: string;
   matchScore: number;
   fitReason: string;
+  matchSignals?: string[];
+  matchWarnings?: string[];
   source: string;
   applyUrl: string;
   postedAt?: string;
@@ -807,6 +811,9 @@ export default function Home() {
                     </div>
 
                     <p className="mt-3 text-sm text-slate-700">{job.fitReason}</p>
+                    <p className="mt-2 text-xs text-slate-500">
+                      Обоснование мэтча: роль + навыки из резюме + seniority + локация.
+                    </p>
                     <div className="mt-3 space-y-2 rounded-xl border border-blue-100 bg-blue-50/60 p-3">
                       <p className="text-xs font-semibold uppercase tracking-wide text-blue-800">
                         Рекомендация по outreach в LinkedIn
