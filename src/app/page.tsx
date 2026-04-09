@@ -47,12 +47,6 @@ type Client = {
   lastAnalyzedAt?: string;
 };
 
-const CONTACT_STATUS_OPTIONS: ContactStatus[] = [
-  "Не найден",
-  "Потенциальный контакт",
-  "Контакт подтверждён",
-];
-
 const OUTREACH_STATUS_OPTIONS: OutreachStatus[] = [
   "Не начат",
   "Черновик",
@@ -389,19 +383,11 @@ export default function Home() {
       const payload = (await response.json()) as { jobs: JobsApiItem[] };
       const jobs: Job[] = payload.jobs.map((item, index) => ({
         ...item,
-        contactStatus: index < 4 ? "Потенциальный контакт" : "Не найден",
-        likelyContact:
-          item.linkedinTargetRole && index < 8
-            ? `${item.linkedinTargetRole} (${item.company})`
-            : index < 4
-              ? `Recruiter ${item.company}`
-              : "",
-        contactConfidence:
-          item.linkedinTargetRole && item.linkedinSearchUrl
-            ? 82
-            : index < 4
-              ? 65 + (index % 3) * 10
-              : 0,
+        contactStatus: item.linkedinSearchUrl ? "Потенциальный контакт" : "Не найден",
+        likelyContact: item.linkedinTargetRole
+          ? `${item.linkedinTargetRole} (${item.company})`
+          : `Talent Acquisition (${item.company})`,
+        contactConfidence: item.linkedinSearchUrl ? 82 : 60,
         outreachStatus: index < 3 ? "Готов к отправке" : "Черновик",
       }));
 
@@ -851,74 +837,62 @@ export default function Home() {
                       </div>
                     </div>
 
-                    <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
-                      <div>
-                        <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">
-                          Статус контакта
-                        </label>
-                        <select
-                          value={job.contactStatus}
-                          onChange={(e) =>
+                    <div className="mt-4 rounded-xl border border-slate-200 bg-white p-3">
+                      <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                        Операционный шаг по вакансии
+                      </p>
+                      <div className="mt-2 grid grid-cols-1 gap-3 md:grid-cols-3">
+                        <div className="md:col-span-2">
+                          <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">
+                            Кому писать
+                          </label>
+                          <input
+                            value={job.likelyContact}
+                            onChange={(e) => updateJob(job.id, { likelyContact: e.target.value })}
+                            placeholder="Имя/роль контакта в LinkedIn"
+                            className="h-10 w-full rounded-lg border border-slate-300 bg-white px-2 text-sm outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+                          />
+                        </div>
+                        <div>
+                          <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">
+                            Следующий шаг
+                          </label>
+                          <select
+                            value={job.outreachStatus}
+                            onChange={(e) =>
+                              updateJob(job.id, {
+                                outreachStatus: e.target.value as OutreachStatus,
+                              })
+                            }
+                            className="h-10 w-full rounded-lg border border-slate-300 bg-white px-2 text-sm outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+                          >
+                            {OUTREACH_STATUS_OPTIONS.map((status) => (
+                              <option key={status} value={status}>
+                                {status}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                      </div>
+                      <div className="mt-3 flex flex-wrap items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() =>
                             updateJob(job.id, {
-                              contactStatus: e.target.value as ContactStatus,
+                              contactStatus: "Контакт подтверждён",
+                              outreachStatus:
+                                job.outreachStatus === "Не начат"
+                                  ? "Черновик"
+                                  : job.outreachStatus,
                             })
                           }
-                          className="h-10 w-full rounded-lg border border-slate-300 bg-white px-2 text-sm outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+                          className="inline-flex h-8 items-center justify-center rounded-md border border-emerald-200 bg-emerald-50 px-3 text-xs font-semibold text-emerald-700 transition hover:bg-emerald-100"
                         >
-                          {CONTACT_STATUS_OPTIONS.map((status) => (
-                            <option key={status} value={status}>
-                              {status}
-                            </option>
-                          ))}
-                        </select>
-                      </div>
-                      <div>
-                        <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">
-                          Вероятный контакт
-                        </label>
-                        <input
-                          value={job.likelyContact}
-                          onChange={(e) => updateJob(job.id, { likelyContact: e.target.value })}
-                          placeholder="Recruiter / Hiring Manager"
-                          className="h-10 w-full rounded-lg border border-slate-300 bg-white px-2 text-sm outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
-                        />
-                      </div>
-                      <div>
-                        <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">
-                          Уверенность, %
-                        </label>
-                        <input
-                          type="number"
-                          min={0}
-                          max={100}
-                          value={job.contactConfidence}
-                          onChange={(e) =>
-                            updateJob(job.id, {
-                              contactConfidence: Number(e.target.value || 0),
-                            })
-                          }
-                          className="h-10 w-full rounded-lg border border-slate-300 bg-white px-2 text-sm outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
-                        />
-                      </div>
-                      <div>
-                        <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">
-                          Статус outreach
-                        </label>
-                        <select
-                          value={job.outreachStatus}
-                          onChange={(e) =>
-                            updateJob(job.id, {
-                              outreachStatus: e.target.value as OutreachStatus,
-                            })
-                          }
-                          className="h-10 w-full rounded-lg border border-slate-300 bg-white px-2 text-sm outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
-                        >
-                          {OUTREACH_STATUS_OPTIONS.map((status) => (
-                            <option key={status} value={status}>
-                              {status}
-                            </option>
-                          ))}
-                        </select>
+                          Контакт подтверждён
+                        </button>
+                        <span className="text-xs text-slate-500">
+                          Текущий статус: {job.contactStatus}
+                        </span>
                       </div>
                     </div>
                   </article>
