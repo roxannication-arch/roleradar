@@ -53,6 +53,15 @@ const US_GREENHOUSE_BOARDS: BoardConfig[] = [
   { slug: "duolingo", company: "Duolingo", size: "scaleup" },
   { slug: "natera", company: "Natera", size: "enterprise" },
   { slug: "brex", company: "Brex", size: "scaleup" },
+  { slug: "okta", company: "Okta", size: "enterprise" },
+  { slug: "twilio", company: "Twilio", size: "enterprise" },
+  { slug: "boxinc", company: "Box", size: "enterprise" },
+  { slug: "elastic", company: "Elastic", size: "enterprise" },
+  { slug: "gusto", company: "Gusto", size: "scaleup" },
+  { slug: "dropbox", company: "Dropbox", size: "enterprise" },
+  { slug: "instabase", company: "Instabase", size: "startup" },
+  { slug: "opendoor", company: "Opendoor", size: "enterprise" },
+  { slug: "tripadvisor", company: "Tripadvisor", size: "enterprise" },
 ];
 
 function normalize(value: string): string {
@@ -195,8 +204,8 @@ function isLikelyUSLocation(raw: string): boolean {
     "united states",
     "usa",
     "u.s.",
-    "us",
     "remote us",
+    "us remote",
     "new york",
     "san francisco",
     "los angeles",
@@ -217,7 +226,8 @@ function isLikelyUSLocation(raw: string): boolean {
     ", ga",
     ", pa",
   ];
-  return tokens.some((token) => location.includes(token));
+  if (tokens.some((token) => location.includes(token))) return true;
+  return /\b[A-Z]{2}\b/.test(raw) && /,\s?[A-Z]{2}\b/.test(raw);
 }
 
 async function fetchBoardJobs(board: BoardConfig): Promise<RealJob[]> {
@@ -259,11 +269,21 @@ function parseExperienceYears(value: string | null): number | null {
   return parsed;
 }
 
+function parsePostedAt(value: string | undefined): Date | null {
+  if (!value) return null;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+  return date;
+}
+
 export async function GET(request: NextRequest) {
   const role = request.nextUrl.searchParams.get("role")?.trim() || "";
   const location = request.nextUrl.searchParams.get("location")?.trim() || "";
   const limit = Number(request.nextUrl.searchParams.get("limit") || "12");
   const companySizes = parseCompanySizes(request.nextUrl.searchParams.get("companySizes"));
+  const daysWindowRaw = Number(request.nextUrl.searchParams.get("daysWindow") || "7");
+  const daysWindow = Math.max(1, Math.min(30, Number.isNaN(daysWindowRaw) ? 7 : daysWindowRaw));
+  const cutoffDate = new Date(Date.now() - daysWindow * 24 * 60 * 60 * 1000);
   const experienceYears = parseExperienceYears(request.nextUrl.searchParams.get("experienceYears"));
   const resumeText = request.nextUrl.searchParams.get("resumeText")?.slice(0, 2500) || "";
   const candidateBand = estimateCandidateBand(
@@ -280,8 +300,13 @@ export async function GET(request: NextRequest) {
       .flatMap((item) => item.value);
 
     const usOnly = fetched.filter((job) => isLikelyUSLocation(job.location));
+    const recentOnly = usOnly.filter((job) => {
+      const postedAt = parsePostedAt(job.postedAt);
+      if (!postedAt) return false;
+      return postedAt >= cutoffDate;
+    });
 
-    const byCompanySize = usOnly.filter((job) => companySizes.includes(job.companySize));
+    const byCompanySize = recentOnly.filter((job) => companySizes.includes(job.companySize));
 
     const byRole = role
       ? byCompanySize.filter((job) => {
@@ -322,9 +347,11 @@ export async function GET(request: NextRequest) {
       location,
       candidateBand,
       companySizes,
+      daysWindow,
       totalFetched: fetched.length,
       totalUS: usOnly.length,
-      totalSizeMatched: byCompanySize.length,
+      totalRecent: recentOnly.length,
+      totalRecentAfterSize: byCompanySize.length,
       totalRoleMatched: byRole.length,
       totalBandMatched: byBand.length,
       jobs: sorted,

@@ -66,6 +66,7 @@ type JobsApiItem = {
   fitReason: string;
   source: string;
   applyUrl: string;
+  postedAt?: string;
 };
  
 const CANDIDATE_LEVEL_OPTIONS: { value: CandidateLevel; label: string }[] = [
