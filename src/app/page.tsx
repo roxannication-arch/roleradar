@@ -396,15 +396,26 @@ export default function Home() {
       }
 
       const payload = (await response.json()) as JobsApiPayload;
-      const jobs: Job[] = payload.jobs.map((item, index) => ({
-        ...item,
-        contactStatus: item.linkedinSearchUrl ? "Потенциальный контакт" : "Не найден",
-        likelyContact: item.linkedinTargetRole
-          ? `${item.linkedinTargetRole} (${item.company})`
-          : `Talent Acquisition (${item.company})`,
-        contactConfidence: item.linkedinSearchUrl ? 82 : 60,
-        outreachStatus: index < 3 ? "Готов к отправке" : "Черновик",
-      }));
+      const exactIds = new Set((payload.exactMatches || []).map((item) => item.id));
+      const adjacentIds = new Set((payload.adjacentMatches || []).map((item) => item.id));
+
+      const jobs: Job[] = payload.jobs.map((item, index) => {
+        const matchCategory: Job["matchCategory"] = exactIds.has(item.id)
+          ? "exact"
+          : adjacentIds.has(item.id)
+            ? "adjacent"
+            : "exact";
+        return {
+          ...item,
+          matchCategory,
+          contactStatus: item.linkedinSearchUrl ? "Потенциальный контакт" : "Не найден",
+          likelyContact: item.linkedinTargetRole
+            ? `${item.linkedinTargetRole} (${item.company})`
+            : `Talent Acquisition (${item.company})`,
+          contactConfidence: item.linkedinSearchUrl ? 82 : 60,
+          outreachStatus: index < 3 ? "Готов к отправке" : "Черновик",
+        };
+      });
 
       updateActiveClient({
         jobs,
@@ -481,6 +492,30 @@ export default function Home() {
   }
   const exactJobs = activeClient.jobs.filter((job) => job.matchCategory === "exact");
   const adjacentJobs = activeClient.jobs.filter((job) => job.matchCategory === "adjacent");
+  const jobsSections =
+    exactJobs.length || adjacentJobs.length
+      ? [
+          {
+            key: "exact",
+            title: "Exact match (роль подтверждена)",
+            subtitle: "Вакансии с прямым ролевым доказательством",
+            jobs: exactJobs,
+          },
+          {
+            key: "adjacent",
+            title: "Adjacent match (смежный контур)",
+            subtitle: "Смежные вакансии с доказательством из описания",
+            jobs: adjacentJobs,
+          },
+        ].filter((section) => section.jobs.length > 0)
+      : [
+          {
+            key: "exact",
+            title: "Результаты анализа",
+            subtitle: "Категоризация недоступна, показываем общий список",
+            jobs: activeClient.jobs,
+          },
+        ];
 
   return (
     <main className="min-h-screen bg-gradient-to-b from-slate-100 to-slate-50 p-4 text-slate-900 md:p-6">
@@ -810,17 +845,15 @@ export default function Home() {
               </div>
             ) : (
               <div className="space-y-6">
-                {[
-                  { key: "exact", title: "Exact match (роль подтверждена)", jobs: exactJobs },
-                  { key: "adjacent", title: "Adjacent match (смежный контур)", jobs: adjacentJobs },
-                ]
-                  .filter((group) => group.jobs.length > 0)
-                  .map((group) => (
+                {jobsSections.map((group) => (
                     <div key={group.key} className="space-y-3">
                       <div className="flex items-center justify-between">
-                        <h4 className="text-sm font-semibold uppercase tracking-wide text-slate-600">
-                          {group.title}
-                        </h4>
+                        <div>
+                          <h4 className="text-sm font-semibold uppercase tracking-wide text-slate-600">
+                            {group.title}
+                          </h4>
+                          <p className="text-xs text-slate-500">{group.subtitle}</p>
+                        </div>
                         <span className="rounded-full border border-slate-200 bg-slate-50 px-2.5 py-1 text-xs font-medium text-slate-600">
                           {group.jobs.length} шт.
                         </span>
