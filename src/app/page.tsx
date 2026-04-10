@@ -1,6 +1,6 @@
 "use client";
 
-import { ChangeEvent, DragEvent, useEffect, useMemo, useRef, useState } from "react";
+import { ChangeEvent, ClipboardEvent, DragEvent, useEffect, useMemo, useRef, useState } from "react";
 
 type ContactStatus = "Не найден" | "Потенциальный контакт" | "Контакт подтверждён";
 type OutreachStatus =
@@ -237,6 +237,7 @@ export default function Home() {
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [analysisError, setAnalysisError] = useState<string>("");
   const [analysisHintLines, setAnalysisHintLines] = useState<string[]>([]);
+  const [resumeInputError, setResumeInputError] = useState<string>("");
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const activeClient = useMemo(
@@ -354,10 +355,18 @@ export default function Home() {
     }
   }
 
-  function applyResumeFile(file: File) {
+  async function applyResumeFile(file: File) {
+    let nextResume = activeClient?.resume || "";
+    if (file.type.startsWith("text/") || file.name.toLowerCase().endsWith(".txt")) {
+      try {
+        nextResume = (await file.text()).slice(0, 12000);
+      } catch {
+        setResumeInputError("Не удалось прочитать текст из файла. Вставьте резюме вручную.");
+      }
+    }
     updateActiveClient({
       resumeFileName: file.name,
-      resume: activeClient?.resume || "",
+      resume: nextResume,
     });
   }
 
@@ -365,13 +374,46 @@ export default function Home() {
     event.preventDefault();
     setDragActive(false);
     if (!event.dataTransfer.files?.length) return;
-    applyResumeFile(event.dataTransfer.files[0]);
+    void applyResumeFile(event.dataTransfer.files[0]);
+    setResumeInputError("");
   }
 
   function onSelectResume(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
     if (!file) return;
-    applyResumeFile(file);
+    void applyResumeFile(file);
+    setResumeInputError("");
+    event.target.value = "";
+  }
+
+  function onPasteResume(event: ClipboardEvent<HTMLTextAreaElement>) {
+    if (!activeClient) return;
+    const pasted = event.clipboardData.getData("text/plain");
+    if (!pasted) return;
+    event.preventDefault();
+    const element = event.currentTarget;
+    const start = element.selectionStart ?? element.value.length;
+    const end = element.selectionEnd ?? element.value.length;
+    const nextResume = `${activeClient.resume.slice(0, start)}${pasted}${activeClient.resume.slice(end)}`;
+    updateActiveClient({ resume: nextResume });
+    setResumeInputError("");
+  }
+
+  async function pasteResumeFromClipboard() {
+    if (!activeClient) return;
+    try {
+      const text = await navigator.clipboard.readText();
+      if (!text.trim()) {
+        setResumeInputError("Буфер обмена пуст. Скопируйте текст резюме и попробуйте снова.");
+        return;
+      }
+      updateActiveClient({ resume: text.slice(0, 12000) });
+      setResumeInputError("");
+    } catch {
+      setResumeInputError(
+        "Браузер заблокировал доступ к буферу. Используйте Ctrl/Cmd+V прямо в поле резюме.",
+      );
+    }
   }
 
   async function runAnalysis() {
@@ -721,14 +763,27 @@ export default function Home() {
                 </div>
 
                 <div>
-                  <label className="mb-1 block text-sm font-medium">Текст резюме</label>
+                  <div className="mb-1 flex items-center justify-between gap-2">
+                    <label className="block text-sm font-medium">Текст резюме</label>
+                    <button
+                      type="button"
+                      onClick={pasteResumeFromClipboard}
+                      className="inline-flex h-8 items-center justify-center rounded-lg border border-slate-300 bg-white px-2.5 text-xs font-medium text-slate-700 transition hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-200 active:translate-y-px"
+                    >
+                      Вставить из буфера
+                    </button>
+                  </div>
                   <textarea
                     value={activeClient.resume}
                     onChange={(e) => updateActiveClient({ resume: e.target.value })}
+                    onPaste={onPasteResume}
                     rows={7}
                     placeholder="Вставьте резюме клиента..."
-                    className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-100"
+                    className="relative z-10 w-full rounded-xl border border-slate-300 px-3 py-2 text-sm outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-100"
                   />
+                  {resumeInputError ? (
+                    <p className="mt-1 text-xs text-rose-700">{resumeInputError}</p>
+                  ) : null}
                 </div>
               </div>
             </div>
