@@ -73,6 +73,17 @@ type BoardConfig = {
   size: CompanySizeBand;
 };
 
+type JobsRequestInput = {
+  role: string;
+  location: string;
+  limit: number;
+  companySizes: CompanySizeBand[];
+  daysWindow: number;
+  experienceYears: number | null;
+  resumeText: string;
+  candidateBand: SeniorityBand;
+};
+
 
 const US_GREENHOUSE_BOARDS: BoardConfig[] = [
   { slug: "stripe", company: "Stripe", size: "enterprise" },
@@ -725,21 +736,95 @@ function parsePostedAt(value: string | undefined): Date | null {
   return date;
 }
 
-export async function GET(request: NextRequest) {
+function normalizeInput(input: JobsRequestInput): JobsRequestInput {
+  return {
+    role: (input.role || "").trim(),
+    location: (input.location || "").trim(),
+    limit: Math.max(1, Math.min(80, Number.isNaN(input.limit) ? 36 : input.limit)),
+    companySizes: input.companySizes.length
+      ? input.companySizes
+      : ["startup", "scaleup", "enterprise"],
+    daysWindow: Math.max(1, Math.min(30, Number.isNaN(input.daysWindow) ? 7 : input.daysWindow)),
+    experienceYears: input.experienceYears,
+    resumeText: (input.resumeText || "").slice(0, 6000),
+    candidateBand: input.candidateBand,
+  };
+}
+
+function parseInputFromSearchParams(request: NextRequest): JobsRequestInput {
   const role = request.nextUrl.searchParams.get("role")?.trim() || "";
   const location = request.nextUrl.searchParams.get("location")?.trim() || "";
   const limit = Number(request.nextUrl.searchParams.get("limit") || "36");
   const companySizes = parseCompanySizes(request.nextUrl.searchParams.get("companySizes"));
-  const daysWindowRaw = Number(request.nextUrl.searchParams.get("daysWindow") || "7");
-  const daysWindow = Math.max(1, Math.min(30, Number.isNaN(daysWindowRaw) ? 7 : daysWindowRaw));
-  const cutoffDate = new Date(Date.now() - daysWindow * 24 * 60 * 60 * 1000);
+  const daysWindow = Number(request.nextUrl.searchParams.get("daysWindow") || "7");
   const experienceYears = parseExperienceYears(request.nextUrl.searchParams.get("experienceYears"));
-  const resumeText = request.nextUrl.searchParams.get("resumeText")?.slice(0, 4000) || "";
+  const resumeText = request.nextUrl.searchParams.get("resumeText")?.slice(0, 6000) || "";
   const candidateBand = estimateCandidateBand(
     experienceYears,
     resumeText,
     request.nextUrl.searchParams.get("candidateBand") || undefined,
   );
+
+  return normalizeInput({
+    role,
+    location,
+    limit,
+    companySizes,
+    daysWindow,
+    experienceYears,
+    resumeText,
+    candidateBand,
+  });
+}
+
+async function parseInputFromBody(request: NextRequest): Promise<JobsRequestInput> {
+  const body = (await request.json()) as Partial<{
+    role: string;
+    location: string;
+    limit: number;
+    daysWindow: number;
+    resumeText: string;
+    experienceYears: string | number | null;
+    candidateBand: string;
+    companySizes: string[] | string;
+  }>;
+
+  const experienceYears = parseExperienceYears(
+    body.experienceYears === null || body.experienceYears === undefined
+      ? null
+      : String(body.experienceYears),
+  );
+  const resumeText = (body.resumeText || "").slice(0, 6000);
+  const companySizesRaw = Array.isArray(body.companySizes)
+    ? body.companySizes.join(",")
+    : typeof body.companySizes === "string"
+      ? body.companySizes
+      : null;
+  const companySizes = parseCompanySizes(companySizesRaw);
+  const candidateBand = estimateCandidateBand(experienceYears, resumeText, body.candidateBand || undefined);
+
+  return normalizeInput({
+    role: (body.role || "").trim(),
+    location: (body.location || "").trim(),
+    limit: Number(body.limit || 36),
+    companySizes,
+    daysWindow: Number(body.daysWindow || 7),
+    experienceYears,
+    resumeText,
+    candidateBand,
+  });
+}
+
+async function handleJobsRequest(inputRaw: JobsRequestInput) {
+  const input = normalizeInput(inputRaw);
+  const role = input.role;
+  const location = input.location;
+  const limit = input.limit;
+  const companySizes = input.companySizes;
+  const daysWindow = input.daysWindow;
+  const resumeText = input.resumeText;
+  const candidateBand = input.candidateBand;
+  const cutoffDate = new Date(Date.now() - daysWindow * 24 * 60 * 60 * 1000);
   const resumeSkills = extractResumeSkills(resumeText);
 
   try {
@@ -896,7 +981,7 @@ export async function GET(request: NextRequest) {
 
     const finalItems = (role ? precisionFiltered : precisionFiltered.length ? precisionFiltered : scored).slice(
       0,
-      Math.max(1, Math.min(80, limit)),
+      limit,
     );
     const exactMatches: RealJob[] = [];
     const adjacentMatches: RealJob[] = [];
@@ -955,6 +1040,25 @@ export async function GET(request: NextRequest) {
         error: error instanceof Error ? error.message : "Unknown error",
       },
       { status: 502 },
+    );
+  }
+}
+
+export async function GET(request: NextRequest) {
+  return handleJobsRequest(parseInputFromSearchParams(request));
+}
+
+export async function POST(request: NextRequest) {
+  try {
+    const input = await parseInputFromBody(request);
+    return handleJobsRequest(input);
+  } catch (error) {
+    return NextResponse.json(
+      {
+        message: "Некорректный payload запроса для анализа вакансий.",
+        error: error instanceof Error ? error.message : "Unknown error",
+      },
+      { status: 400 },
     );
   }
 }

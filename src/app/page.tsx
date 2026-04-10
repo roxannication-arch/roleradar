@@ -380,17 +380,22 @@ export default function Home() {
     setAnalysisError("");
     setAnalysisHintLines([]);
     try {
-      const params = new URLSearchParams({
+      const requestPayload = {
         role: activeClient.targetRole || "",
         location: activeClient.location || "",
-        resumeText: activeClient.resume || "",
+        // Keep payload compact but informative for matching.
+        resumeText: (activeClient.resume || "").slice(0, 6000),
         candidateBand: activeClient.candidateLevel,
         experienceYears: activeClient.experienceYears || "",
-        companySizes: activeClient.preferredCompanySizes.join(","),
-        daysWindow: "7",
-        limit: "60",
+        companySizes: activeClient.preferredCompanySizes,
+        daysWindow: 7,
+        limit: 60,
+      };
+      const response = await fetch("/api/jobs", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(requestPayload),
       });
-      const response = await fetch(`/api/jobs?${params.toString()}`);
       if (!response.ok) {
         throw new Error(`API returned status ${response.status}`);
       }
