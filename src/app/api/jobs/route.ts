@@ -529,6 +529,9 @@ function buildMatchContext(
   if (roleTokens.length && matchedRoleConcepts.length === 0 && matchedAdjacentTerms.length === 0) {
     penalties.push("low-role-evidence");
   }
+  if (resumeSkills.length >= 3 && resumeSkillsMatched.length === 0) {
+    penalties.push("no-resume-skill-overlap");
+  }
   if (roleTokens.length >= 2 && matchedRoleTokens.length < Math.ceil(roleTokens.length / 2)) {
     penalties.push("low-role-token-overlap");
   }
@@ -572,6 +575,7 @@ function scoreJobMatch(context: MatchContext, candidateBand: SeniorityBand): num
   if (candidateBand === "junior" && !context.seniorityMatched) score -= 16;
   if (context.penalties.includes("domain-conflict")) score -= 30;
   if (context.penalties.includes("low-role-evidence")) score -= 18;
+  if (context.penalties.includes("no-resume-skill-overlap")) score -= 6;
   if (context.penalties.includes("low-role-token-overlap")) score -= 14;
   if (context.penalties.includes("hard-gate-failed")) score -= 35;
   if (context.penalties.includes("location-mismatch")) score -= 6;
@@ -979,6 +983,39 @@ async function handleJobsRequest(inputRaw: JobsRequestInput) {
       }
     }
 
+    // If we have too few strict matches (e.g. only 1 result), expand recall
+    // with a controlled top-up that still requires meaningful evidence.
+    const minOperationalResults = role ? Math.min(limit, 8) : Math.min(limit, 12);
+    if (strictRoleRequested && precisionFiltered.length > 0 && precisionFiltered.length < minOperationalResults) {
+      const firstRelaxedFloor = Math.max(46, minScore - 10);
+      const requiresResumeSignal = resumeSkills.length >= 2;
+      const supplemental = scored.filter(
+        (item) =>
+          item.job.matchScore >= firstRelaxedFloor &&
+          !item.context.hasNegativeDomainConflict &&
+          !item.context.penalties.includes("seniority-gap") &&
+          (item.context.matchedRoleTokens.length > 0 ||
+            item.context.matchedRoleConcepts.length > 0 ||
+            (item.context.matchedAdjacentTerms.length > 0 && item.context.evidenceSnippets.length > 0) ||
+            item.context.resumeSkillsMatched.length >= 2) &&
+          (!requiresResumeSignal ||
+            item.context.resumeSkillsMatched.length > 0 ||
+            item.context.matchedRoleTokens.length >= 2 ||
+            item.context.matchedRoleConcepts.length >= 2),
+      );
+
+      if (supplemental.length > 0) {
+        const merged = [...precisionFiltered, ...supplemental]
+          .filter(
+            (item, index, arr) => arr.findIndex((candidate) => candidate.job.id === item.job.id) === index,
+          )
+          .sort((a, b) => b.job.matchScore - a.job.matchScore);
+        precisionFiltered = merged;
+        minScore = Math.min(minScore, firstRelaxedFloor);
+        poolUsed = `${poolUsed}+topup`;
+      }
+    }
+
     const finalItems = (role ? precisionFiltered : precisionFiltered.length ? precisionFiltered : scored).slice(
       0,
       limit,
@@ -986,9 +1023,13 @@ async function handleJobsRequest(inputRaw: JobsRequestInput) {
     const exactMatches: RealJob[] = [];
     const adjacentMatches: RealJob[] = [];
     for (const item of finalItems) {
-      const requiredTokenOverlap = Math.max(1, Math.ceil(item.context.roleTokens.length / 2));
+      const requiredTokenOverlap =
+        item.context.roleTokens.length <= 1
+          ? 1
+          : Math.max(2, Math.ceil(item.context.roleTokens.length * 0.67));
       const hasStrongRoleEvidence =
-        item.context.matchedRoleConcepts.length > 0 ||
+        item.context.matchedRoleConcepts.length >= requiredTokenOverlap ||
+        (item.context.matchedRoleConcepts.length > 0 && item.context.matchedRoleTokens.length > 0) ||
         item.context.matchedRoleTokens.length >= requiredTokenOverlap;
       if (!strictRoleRequested || hasStrongRoleEvidence) {
         exactMatches.push(item.job);
