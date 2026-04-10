@@ -780,7 +780,11 @@ export async function GET(request: NextRequest) {
         ? byBand
         : byRoleAdjacent.length
           ? byRoleAdjacent
-          : byRole
+          : byRole.length
+            ? byRole
+            : byCompanySize.length
+              ? byCompanySize
+              : recentOnly
       : byBand.length >= 8
         ? byBand
         : byRole.length >= 8
@@ -834,7 +838,11 @@ export async function GET(request: NextRequest) {
         ? "strict-role+band"
         : byRoleAdjacent.length
           ? "strict-role-adjacent"
-          : "strict-role"
+          : byRole.length
+            ? "strict-role"
+            : byCompanySize.length
+              ? "strict-company-size-fallback"
+              : "strict-recent-fallback"
       : byBand.length >= 8
         ? "band"
         : byRole.length >= 8
@@ -868,18 +876,43 @@ export async function GET(request: NextRequest) {
       }
     }
 
+    // If strict matching still yields 0, keep operational continuity with
+    // a safe relaxed fallback that still requires non-trivial evidence.
+    if (strictRoleRequested && precisionFiltered.length === 0) {
+      const relaxedButRelevant = scored.filter(
+        (item) =>
+          !item.context.hasNegativeDomainConflict &&
+          (item.context.matchedRoleTokens.length > 0 ||
+            item.context.matchedRoleConcepts.length > 0 ||
+            item.context.matchedAdjacentTerms.length > 0 ||
+            item.context.resumeSkillsMatched.length >= 2),
+      );
+      if (relaxedButRelevant.length > 0) {
+        precisionFiltered = relaxedButRelevant;
+        minScore = Math.min(minScore, 48);
+        poolUsed = `${poolUsed}+relaxed`;
+      }
+    }
+
     const finalItems = (role ? precisionFiltered : precisionFiltered.length ? precisionFiltered : scored).slice(
       0,
       Math.max(1, Math.min(80, limit)),
     );
-    const exactMatches = finalItems
-      .filter((item) => item.context.matchedRoleConcepts.length > 0)
-      .map((item) => item.job);
-    const adjacentMatches = finalItems
-      .filter((item) => item.context.matchedRoleConcepts.length === 0 && item.context.matchedAdjacentTerms.length > 0)
-      .map((item) => item.job);
+    const exactMatches: RealJob[] = [];
+    const adjacentMatches: RealJob[] = [];
+    for (const item of finalItems) {
+      const requiredTokenOverlap = Math.max(1, Math.ceil(item.context.roleTokens.length / 2));
+      const hasStrongRoleEvidence =
+        item.context.matchedRoleConcepts.length > 0 ||
+        item.context.matchedRoleTokens.length >= requiredTokenOverlap;
+      if (!strictRoleRequested || hasStrongRoleEvidence) {
+        exactMatches.push(item.job);
+      } else {
+        adjacentMatches.push(item.job);
+      }
+    }
     const sorted = [...exactMatches, ...adjacentMatches];
-    const strictNoResults = strictRoleRequested && sorted.length === 0;
+    const strictNoResults = strictRoleRequested && finalItems.length === 0;
 
     return NextResponse.json({
       source: "US job sites (Greenhouse + Lever)",

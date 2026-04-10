@@ -396,10 +396,21 @@ export default function Home() {
       }
 
       const payload = (await response.json()) as JobsApiPayload;
-      const exactIds = new Set((payload.exactMatches || []).map((item) => item.id));
-      const adjacentIds = new Set((payload.adjacentMatches || []).map((item) => item.id));
+      const exactMatches = Array.isArray(payload.exactMatches) ? payload.exactMatches : [];
+      const adjacentMatches = Array.isArray(payload.adjacentMatches) ? payload.adjacentMatches : [];
+      const primaryJobs = Array.isArray(payload.jobs) ? payload.jobs : [];
 
-      const jobs: Job[] = payload.jobs.map((item, index) => {
+      // Backward/forward-compatible fallback: if "jobs" is empty, rebuild list
+      // from sectioned arrays to avoid losing results in UI.
+      const sourceJobs = primaryJobs.length
+        ? primaryJobs
+        : [...exactMatches, ...adjacentMatches].filter(
+            (job, index, arr) => arr.findIndex((item) => item.id === job.id) === index,
+          );
+      const exactIds = new Set(exactMatches.map((item) => item.id));
+      const adjacentIds = new Set(adjacentMatches.map((item) => item.id));
+
+      const jobs: Job[] = sourceJobs.map((item, index) => {
         const matchCategory: Job["matchCategory"] = exactIds.has(item.id)
           ? "exact"
           : adjacentIds.has(item.id)
@@ -421,9 +432,12 @@ export default function Home() {
         jobs,
         lastAnalyzedAt: new Date().toISOString().slice(0, 10),
       });
-      if (!jobs.length && payload.noResultsReason) {
-        setAnalysisError(payload.noResultsReason);
-        setAnalysisHintLines(payload.suggestedRoleHints || []);
+      if (!jobs.length) {
+        setAnalysisError(
+          payload.noResultsReason ||
+            "По текущим фильтрам вакансии не найдены. Ослабьте формулировку роли или размер компании.",
+        );
+        setAnalysisHintLines(Array.isArray(payload.suggestedRoleHints) ? payload.suggestedRoleHints : []);
       }
       setGeneratedReport("");
       setIsReportOpen(false);
