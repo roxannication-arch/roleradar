@@ -5,18 +5,13 @@ const ANTHROPIC_MODEL = "claude-sonnet-4-20250514";
 const ANTHROPIC_VERSION = "2023-06-01";
 const DEFAULT_MAX_TOKENS = 1000;
 const MAX_RETRIES = 0;
-const BASE_RETRY_DELAY_MS = 1500;
-const UPSTREAM_TIMEOUT_MS = 7500;
+const UPSTREAM_TIMEOUT_MS = 20000;
 
 type ClaudeProxyRequest = {
   messages?: unknown;
   tools?: unknown;
   system?: unknown;
 };
-
-function sleep(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
 
 export async function POST(request: NextRequest) {
   const apiKey = process.env.ANTHROPIC_API_KEY;
@@ -84,12 +79,7 @@ export async function POST(request: NextRequest) {
     if (upstreamResponse.status !== 429 || attempt === MAX_RETRIES) {
       break;
     }
-    const retryAfterHeader = upstreamResponse.headers.get("retry-after");
-    const retryAfterSeconds = retryAfterHeader ? Number(retryAfterHeader) : NaN;
-    const delayMs = Number.isFinite(retryAfterSeconds)
-      ? Math.max(1200, retryAfterSeconds * 1000)
-      : BASE_RETRY_DELAY_MS * (attempt + 1);
-    await sleep(delayMs);
+    // Currently retries are disabled (MAX_RETRIES = 0).
   }
 
   if (!upstreamResponse) {
