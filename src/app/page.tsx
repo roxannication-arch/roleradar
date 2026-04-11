@@ -702,7 +702,7 @@ export default function Home() {
       `Location hint: ${clientSnapshot.location || "unknown"}.`,
     ].join("\n");
 
-    if (!clientSnapshot.resume.trim() && (!file || file.type !== "application/pdf")) {
+    if (!clientSnapshot.resume.trim()) {
       throw new Error("Для анализа резюме нужен текст или PDF файл.");
     }
 
@@ -719,12 +719,11 @@ export default function Home() {
             data: base64Pdf,
           },
         });
-      } else {
-        contentBlocks.push({
-          type: "text",
-          text: `Resume text:\n${clientSnapshot.resume.slice(0, 12000)}`,
-        });
       }
+      contentBlocks.push({
+        type: "text",
+        text: `Resume text:\n${clientSnapshot.resume.slice(0, 12000)}`,
+      });
 
       const payload = await callClaudeProxy({
         messages: [{ role: "user", content: contentBlocks }],
@@ -749,12 +748,29 @@ export default function Home() {
   async function applyResumeFile(file: File) {
     if (!activeClient) return;
     let nextResume = activeClient.resume || "";
-    if (file.type.startsWith("text/") || file.name.toLowerCase().endsWith(".txt")) {
-      try {
-        nextResume = (await file.text()).slice(0, 12000);
-      } catch {
-        setResumeInputError("Не удалось прочитать текст из файла. Вставьте резюме вручную.");
+    try {
+      const formData = new FormData();
+      formData.set("file", file);
+      const extractionResponse = await fetch("/api/resume-extract", {
+        method: "POST",
+        body: formData,
+      });
+      const extractionPayload = (await extractionResponse.json().catch(() => null)) as
+        | { text?: string; message?: string }
+        | null;
+      if (!extractionResponse.ok || !extractionPayload?.text) {
+        throw new Error(
+          extractionPayload?.message ||
+            "Не удалось извлечь текст из файла. Вставьте резюме вручную.",
+        );
       }
+      nextResume = extractionPayload.text.slice(0, 12000);
+    } catch (error) {
+      setResumeInputError(
+        error instanceof Error
+          ? error.message
+          : "Не удалось извлечь текст из файла. Вставьте резюме вручную.",
+      );
     }
     const nextClient: Client = {
       ...activeClient,
