@@ -116,7 +116,7 @@ const COMPANY_SIZE_OPTIONS: { value: CompanySize; label: string }[] = [
 const WEB_SEARCH_TOOL = {
   type: "web_search_20250305",
   name: "web_search",
-  max_uses: 4,
+  max_uses: 2,
 };
 
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
@@ -172,6 +172,10 @@ function unique<T>(arr: T[]): T[] {
 
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function todayRu(): string {
@@ -464,7 +468,7 @@ async function parseClaudeJsonWithRepair<T>(payload: unknown, schemaHint: string
       schemaHint,
       "",
       "Content to convert:",
-      rawText.slice(0, 16000),
+      rawText.slice(0, 6000),
     ].join("\n");
 
     const repairPayload = await callClaudeProxy({
@@ -473,6 +477,37 @@ async function parseClaudeJsonWithRepair<T>(payload: unknown, schemaHint: string
 
     const repaired = parseClaudeJson<T>(repairPayload);
     return repaired;
+  }
+}
+
+function isRateLimitError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  const message = error.message.toLowerCase();
+  return message.includes("rate limit") || message.includes("429");
+}
+
+function humanizeClaudeError(error: unknown): string {
+  if (!(error instanceof Error)) {
+    return "Не удалось выполнить запрос к Claude.";
+  }
+  if (isRateLimitError(error)) {
+    return "Claude временно ограничил запросы. Подождите 30–60 секунд и нажмите «Запустить» снова.";
+  }
+  return error.message;
+}
+
+async function runWithRateLimitRetry<T>(task: () => Promise<T>, retries = 1): Promise<T> {
+  let attempt = 0;
+  while (true) {
+    try {
+      return await task();
+    } catch (error) {
+      if (!isRateLimitError(error) || attempt >= retries) {
+        throw error;
+      }
+      attempt += 1;
+      await sleep(5000 * attempt);
+    }
   }
 }
 
@@ -576,7 +611,15 @@ async function callClaudeProxy(body: { messages: unknown[]; tools?: unknown[]; s
       payload && typeof payload === "object" && "message" in payload
         ? String((payload as { message: unknown }).message)
         : `status ${response.status}`;
-    throw new Error(`Ошибка /api/claude: ${details}`);
+    const upstreamStatus =
+      payload && typeof payload === "object" && "upstreamStatus" in payload
+        ? Number((payload as { upstreamStatus?: unknown }).upstreamStatus)
+        : response.status;
+    const error = new Error(`Ошибка /api/claude: ${details}`);
+    (error as Error & { status?: number }).status = Number.isFinite(upstreamStatus)
+      ? upstreamStatus
+      : response.status;
+    throw error;
   }
   return payload;
 }
@@ -796,7 +839,7 @@ export default function Home() {
       }
       contentBlocks.push({
         type: "text",
-        text: `Resume text:\n${clientSnapshot.resume.slice(0, 12000)}`,
+        text: `Resume text:\n${clientSnapshot.resume.slice(0, 6000)}`,
       });
 
       const payload = await callClaudeProxy({
@@ -864,9 +907,7 @@ export default function Home() {
     try {
       await ensureResumeAnalysis(nextClient, false, file);
     } catch (error) {
-      setResumeInputError(
-        error instanceof Error ? error.message : "Не удалось распарсить резюме через Claude.",
-      );
+      setResumeInputError(humanizeClaudeError(error));
     }
   }
 
@@ -929,20 +970,23 @@ export default function Home() {
       await ensureResumeAnalysis(activeClient, true);
       setResumeInputError("");
     } catch (error) {
-      setResumeInputError(
-        error instanceof Error ? error.message : "Не удалось переанализировать резюме.",
-      );
+      setResumeInputError(humanizeClaudeError(error));
     }
   }
 
   function buildCandidateContext(clientSnapshot: Client, profile: ResumeProfile): string {
+    const compactSkills = profile.topSkills.slice(0, 6);
+    const compactIndustries = profile.industries.slice(0, 3);
+    const compactCurrentTitles = profile.jobTitlesCurrent.slice(0, 2);
+    const compactTargetTitles = profile.jobTitlesTarget.slice(0, 2);
     return [
-      `Candidate target role: ${clientSnapshot.targetRole || profile.jobTitlesTarget.join(", ") || "unknown"}`,
+      `Candidate target role: ${clientSnapshot.targetRole || compactTargetTitles.join(", ") || "unknown"}`,
       `Candidate location: ${clientSnapshot.location || profile.location || "United States"}`,
       `Candidate seniority: ${profile.seniorityLevel || clientSnapshot.candidateLevel}`,
       `Years of experience: ${(profile.totalYearsExperience ?? clientSnapshot.experienceYears) || "unknown"}`,
-      `Top skills: ${profile.topSkills.join(", ") || "unknown"}`,
-      `Industries: ${profile.industries.join(", ") || "unknown"}`,
+      `Current titles: ${compactCurrentTitles.join(", ") || "unknown"}`,
+      `Top skills: ${compactSkills.join(", ") || "unknown"}`,
+      `Industries: ${compactIndustries.join(", ") || "unknown"}`,
       `Preferred company size: ${clientSnapshot.preferredCompanySizes.join(", ")}`,
     ].join("\n");
   }
@@ -972,7 +1016,7 @@ export default function Home() {
       "    }",
       "  ]",
       "}",
-      "Return at least 8 items. Do not include duplicates.",
+      "Return 6-10 items. Do not include duplicates.",
       `Search focus: ${variantQuery}.`,
       "Candidate context:",
       buildCandidateContext(clientSnapshot, profile),
@@ -1124,8 +1168,12 @@ export default function Home() {
         },
       ];
 
-      const batches = await Promise.all(
-        variants.map((variant) => fetchJobsVariant(variant.label, variant.query, activeClient, profile)),
+      const batches = await runWithRateLimitRetry(
+        () =>
+          Promise.all(
+            variants.map((variant) => fetchJobsVariant(variant.label, variant.query, activeClient, profile)),
+          ),
+        1,
       );
 
       let merged = unique(
@@ -1173,11 +1221,7 @@ export default function Home() {
       }));
       updateActiveClient({ lastAnalyzedAt: new Date().toISOString().slice(0, 10) });
     } catch (error) {
-      setJobsError(
-        error instanceof Error
-          ? error.message
-          : "Не удалось получить вакансии через Claude web_search.",
-      );
+      setJobsError(humanizeClaudeError(error));
     } finally {
       setIsJobsLoading(false);
     }
@@ -1278,8 +1322,12 @@ export default function Home() {
         },
       ];
 
-      const batches = await Promise.all(
-        tasks.map((task) => fetchSignalsVariant(task.trigger, task.query, activeClient, profile)),
+      const batches = await runWithRateLimitRetry(
+        () =>
+          Promise.all(
+            tasks.map((task) => fetchSignalsVariant(task.trigger, task.query, activeClient, profile)),
+          ),
+        1,
       );
 
       const merged = unique(
@@ -1320,11 +1368,7 @@ export default function Home() {
         },
       }));
     } catch (error) {
-      setSignalsError(
-        error instanceof Error
-          ? error.message
-          : "Не удалось построить сигналы роста через Claude web_search.",
-      );
+      setSignalsError(humanizeClaudeError(error));
     } finally {
       setIsSignalsLoading(false);
     }

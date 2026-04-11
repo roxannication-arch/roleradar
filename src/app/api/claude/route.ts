@@ -4,12 +4,18 @@ const ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_MODEL = "claude-sonnet-4-20250514";
 const ANTHROPIC_VERSION = "2023-06-01";
 const DEFAULT_MAX_TOKENS = 1000;
+const MAX_RETRIES = 3;
+const BASE_RETRY_DELAY_MS = 1500;
 
 type ClaudeProxyRequest = {
   messages?: unknown;
   tools?: unknown;
   system?: unknown;
 };
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 export async function POST(request: NextRequest) {
   const apiKey = process.env.ANTHROPIC_API_KEY;
@@ -47,16 +53,36 @@ export async function POST(request: NextRequest) {
     upstreamPayload.system = payload.system;
   }
 
-  const upstreamResponse = await fetch(ANTHROPIC_API_URL, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-api-key": apiKey,
-      "anthropic-version": ANTHROPIC_VERSION,
-    },
-    body: JSON.stringify(upstreamPayload),
-    cache: "no-store",
-  });
+  let upstreamResponse: Response | null = null;
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt += 1) {
+    upstreamResponse = await fetch(ANTHROPIC_API_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": apiKey,
+        "anthropic-version": ANTHROPIC_VERSION,
+      },
+      body: JSON.stringify(upstreamPayload),
+      cache: "no-store",
+    });
+
+    if (upstreamResponse.status !== 429 || attempt === MAX_RETRIES) {
+      break;
+    }
+    const retryAfterHeader = upstreamResponse.headers.get("retry-after");
+    const retryAfterSeconds = retryAfterHeader ? Number(retryAfterHeader) : NaN;
+    const delayMs = Number.isFinite(retryAfterSeconds)
+      ? Math.max(1200, retryAfterSeconds * 1000)
+      : BASE_RETRY_DELAY_MS * (attempt + 1);
+    await sleep(delayMs);
+  }
+
+  if (!upstreamResponse) {
+    return NextResponse.json(
+      { message: "Не удалось выполнить запрос к Claude API." },
+      { status: 502 },
+    );
+  }
 
   const responseText = await upstreamResponse.text();
   let responseJson: unknown = null;
@@ -67,6 +93,17 @@ export async function POST(request: NextRequest) {
   }
 
   if (!upstreamResponse.ok) {
+    if (upstreamResponse.status === 429) {
+      return NextResponse.json(
+        {
+          message:
+            "Claude временно ограничил запросы (rate limit). Подождите около минуты и повторите.",
+          upstreamStatus: upstreamResponse.status,
+          upstream: responseJson,
+        },
+        { status: 429 },
+      );
+    }
     return NextResponse.json(
       {
         message: "Ошибка запроса к Claude API.",
