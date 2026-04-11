@@ -85,6 +85,25 @@ type ClaudeResponseContentBlock = {
   text?: string;
 };
 
+type LegacyJobApiItem = {
+  id?: string;
+  title?: string;
+  company?: string;
+  location?: string;
+  matchScore?: number;
+  fitReason?: string;
+  applyUrl?: string;
+  postedAt?: string;
+  linkedinTargetRole?: string;
+  outreachTip?: string;
+};
+
+type LegacyJobsPayload = {
+  jobs?: LegacyJobApiItem[];
+  exactMatches?: LegacyJobApiItem[];
+  adjacentMatches?: LegacyJobApiItem[];
+};
+
 const OUTREACH_STATUS_OPTIONS: OutreachStatus[] = [
   "Найдено",
   "Outreach отправлен",
@@ -240,6 +259,7 @@ function parseSignalPriority(value: unknown): SignalPriority {
   if (value === "hot" || value === "warm" || value === "cold") return value;
   return "warm";
 }
+
 
 function parseSignalTrigger(value: unknown): SignalTrigger {
   if (value === "funding" || value === "expansion" || value === "key_hire" || value === "contract") {
@@ -1173,6 +1193,88 @@ export default function Home() {
     return { score, reason };
   }
 
+  async function fetchJobsFromFallbackEngine(
+    clientSnapshot: Client,
+    previousStatuses: Map<string, OutreachStatus>,
+  ): Promise<JobItem[]> {
+    const response = await fetch("/api/jobs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        role: clientSnapshot.targetRole || "",
+        location: clientSnapshot.location || "",
+        resumeText: (clientSnapshot.resume || "").slice(0, 4000),
+        candidateBand: clientSnapshot.candidateLevel,
+        experienceYears: clientSnapshot.experienceYears || "",
+        companySizes: clientSnapshot.preferredCompanySizes,
+        daysWindow: 7,
+        limit: 40,
+      }),
+    });
+    if (!response.ok) {
+      throw new Error(`Fallback API returned ${response.status}`);
+    }
+    const payload = (await response.json()) as LegacyJobsPayload;
+    const sourceItems = Array.isArray(payload.jobs) && payload.jobs.length
+      ? payload.jobs
+      : [...(payload.exactMatches || []), ...(payload.adjacentMatches || [])];
+
+    const deduped = unique(
+      sourceItems
+        .map((item) => (typeof item.applyUrl === "string" ? normalizeJobUrl(item.applyUrl) : ""))
+        .filter(Boolean),
+    ).map((url) => sourceItems.find((item) => normalizeJobUrl(item.applyUrl || "") === url)!);
+
+    return deduped
+      .slice(0, 30)
+      .map((item, index) => {
+        const url = normalizeJobUrl(item.applyUrl || "");
+        const score = typeof item.matchScore === "number" ? clamp(item.matchScore, 0, 100) : 62;
+        return {
+          id: makeStableId([item.id || url || String(index), "fallback"]),
+          title: item.title || "Untitled role",
+          company: item.company || "Unknown company",
+          location: item.location || "United States",
+          url,
+          postedAt: item.postedAt,
+          sourceVariant: "Fallback US job boards",
+          companySize: "unknown",
+          hiringContactRole: item.linkedinTargetRole || "Talent Acquisition Manager",
+          evidence: item.fitReason || "Вакансия получена из fallback-движка RoleRadar.",
+          outreachMessage:
+            item.outreachTip ||
+            `Hi, I saw this role and believe my profile is a strong fit. I would love to connect and share relevant experience.`,
+          fitScore: score,
+          fitReason: item.fitReason || "Matched by fallback engine (US job boards).",
+          status: previousStatuses.get(url) || "Найдено",
+        } satisfies JobItem;
+      })
+      .filter((item) => item.url.startsWith("http"));
+  }
+
+  function buildSignalsFallbackFromJobs(
+    jobs: JobItem[],
+    previousStatuses: Map<string, OutreachStatus>,
+  ): GrowthSignal[] {
+    return jobs.slice(0, 8).map((job, index) => {
+      const triggerType: SignalTrigger = index % 2 === 0 ? "key_hire" : "contract";
+      const priority: SignalPriority = index < 2 ? "hot" : index < 5 ? "warm" : "cold";
+      const sourceUrl = normalizeJobUrl(job.url);
+      const signalId = makeStableId([job.company, triggerType, sourceUrl, "fallback-signal"]);
+      return {
+        id: signalId,
+        company: job.company,
+        triggerType,
+        priority,
+        hiringManager: job.hiringContactRole || "Hiring Manager",
+        evidence: `Fallback signal based on active hiring for ${job.title} at ${job.company}.`,
+        sourceUrl,
+        outreachMessage: `Hi, I noticed your team is actively hiring for ${job.title}. My background aligns well with this direction, and I'd value a quick conversation about potential fit and priorities.`,
+        status: previousStatuses.get(`${job.company}|${triggerType}|${sourceUrl}`) || "Найдено",
+      };
+    });
+  }
+
   async function runJobsEngine(forceRefresh: boolean) {
     if (!activeClient) return;
     if (activeRun !== "none") {
@@ -1294,7 +1396,21 @@ export default function Home() {
         );
       }
     } catch (error) {
-      setJobsError(humanizeClaudeError(error));
+      const previousStatuses = new Map(activeJobs.map((job) => [normalizeJobUrl(job.url), job.status]));
+      try {
+        const fallbackJobs = await fetchJobsFromFallbackEngine(activeClient, previousStatuses);
+        if (fallbackJobs.length > 0) {
+          setJobsCacheByClient((prev) => ({
+            ...prev,
+            [activeClient.id]: { items: fallbackJobs, timestamp: Date.now() },
+          }));
+          setJobsError("Claude временно недоступен, показаны результаты из fallback job engine.");
+        } else {
+          setJobsError(humanizeClaudeError(error));
+        }
+      } catch {
+        setJobsError(humanizeClaudeError(error));
+      }
     } finally {
       setIsJobsLoading(false);
       setActiveRun("none");
@@ -1465,7 +1581,25 @@ export default function Home() {
         );
       }
     } catch (error) {
-      setSignalsError(humanizeClaudeError(error));
+      const previousStatuses = new Map(
+        activeSignals.map((signal) => [
+          `${signal.company}|${signal.triggerType}|${normalizeJobUrl(signal.sourceUrl)}`,
+          signal.status,
+        ]),
+      );
+      const fallbackSignals = buildSignalsFallbackFromJobs(activeJobs, previousStatuses);
+      if (fallbackSignals.length > 0) {
+        setSignalsCacheByClient((prev) => ({
+          ...prev,
+          [activeClient.id]: {
+            items: fallbackSignals,
+            timestamp: Date.now(),
+          },
+        }));
+        setSignalsError("Claude временно недоступен, показаны fallback сигналы по активным вакансиям.");
+      } else {
+        setSignalsError(humanizeClaudeError(error));
+      }
     } finally {
       setIsSignalsLoading(false);
       setActiveRun("none");
