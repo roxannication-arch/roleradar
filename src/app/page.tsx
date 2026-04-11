@@ -301,6 +301,15 @@ function loadMapFromStorage<T>(key: string): Record<string, T> {
   }
 }
 
+function safeSetLocalStorage(key: string, value: unknown) {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(key, JSON.stringify(value));
+  } catch {
+    // localStorage can fail (e.g. quota exceeded); keep UI functional.
+  }
+}
+
 function normalizeJobUrl(url: string): string {
   try {
     const parsed = new URL(url);
@@ -549,28 +558,24 @@ export default function Home() {
   }, [clients, activeClientId]);
 
   useEffect(() => {
-    if (typeof window === "undefined") return;
-    window.localStorage.setItem(CLIENTS_STORAGE_KEY, JSON.stringify(clients));
+    safeSetLocalStorage(CLIENTS_STORAGE_KEY, clients);
   }, [clients]);
 
   useEffect(() => {
-    if (typeof window === "undefined" || !activeClientId) return;
-    window.localStorage.setItem(ACTIVE_CLIENT_STORAGE_KEY, activeClientId);
+    if (!activeClientId) return;
+    safeSetLocalStorage(ACTIVE_CLIENT_STORAGE_KEY, activeClientId);
   }, [activeClientId]);
 
   useEffect(() => {
-    if (typeof window === "undefined") return;
-    window.localStorage.setItem(RESUME_ANALYSIS_STORAGE_KEY, JSON.stringify(resumeAnalysisByClient));
+    safeSetLocalStorage(RESUME_ANALYSIS_STORAGE_KEY, resumeAnalysisByClient);
   }, [resumeAnalysisByClient]);
 
   useEffect(() => {
-    if (typeof window === "undefined") return;
-    window.localStorage.setItem(JOBS_CACHE_STORAGE_KEY, JSON.stringify(jobsCacheByClient));
+    safeSetLocalStorage(JOBS_CACHE_STORAGE_KEY, jobsCacheByClient);
   }, [jobsCacheByClient]);
 
   useEffect(() => {
-    if (typeof window === "undefined") return;
-    window.localStorage.setItem(SIGNALS_CACHE_STORAGE_KEY, JSON.stringify(signalsCacheByClient));
+    safeSetLocalStorage(SIGNALS_CACHE_STORAGE_KEY, signalsCacheByClient);
   }, [signalsCacheByClient]);
 
   const pipelineSummary = useMemo(() => {
@@ -1355,6 +1360,12 @@ export default function Home() {
               <input
                 value={newClientName}
                 onChange={(e) => setNewClientName(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    addClient();
+                  }
+                }}
                 placeholder="Добавить клиента"
                 className="h-10 w-full rounded-xl border border-slate-300 px-3 text-sm outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-100"
               />
@@ -1371,7 +1382,7 @@ export default function Home() {
           <ul className="max-h-[65vh] space-y-2 overflow-y-auto p-4">
             {clients.map((client) => {
               const active = client.id === activeClientId;
-              const jobsCount = jobsCacheByClient[client.id]?.items.length || 0;
+              const jobsCount = jobsCacheByClient[client.id]?.items?.length || 0;
               return (
                 <li
                   key={client.id}
