@@ -616,12 +616,28 @@ function normalizeResumeProfile(raw: unknown, fallbackLocation: string): ResumeP
   };
 }
 
+const CLAUDE_PROXY_TIMEOUT_MS = 35000;
+
 async function callClaudeProxy(body: { messages: unknown[]; tools?: unknown[]; system?: string }) {
-  const response = await fetch("/api/claude", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), CLAUDE_PROXY_TIMEOUT_MS);
+  let response: Response;
+  try {
+    response = await fetch("/api/claude", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+  } catch (error) {
+    clearTimeout(timeout);
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw new Error("Запрос к Claude превысил лимит ожидания. Нажмите «Обновить».");
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
   const payload = await response.json().catch(() => null);
   if (!response.ok) {
     const details =
