@@ -511,6 +511,23 @@ async function runWithRateLimitRetry<T>(task: () => Promise<T>, retries = 1): Pr
   }
 }
 
+async function runInBatches<TInput, TOutput>(
+  items: TInput[],
+  batchSize: number,
+  worker: (item: TInput) => Promise<TOutput>,
+): Promise<TOutput[]> {
+  const results: TOutput[] = [];
+  for (let i = 0; i < items.length; i += batchSize) {
+    const chunk = items.slice(i, i + batchSize);
+    const chunkResults = await Promise.all(chunk.map((item) => worker(item)));
+    results.push(...chunkResults);
+    if (i + batchSize < items.length) {
+      await sleep(1200);
+    }
+  }
+  return results;
+}
+
 function scoreTone(score: number): string {
   if (score >= 85) return "bg-emerald-100 text-emerald-800 border-emerald-200";
   if (score >= 70) return "bg-amber-100 text-amber-800 border-amber-200";
@@ -1175,8 +1192,8 @@ export default function Home() {
 
       const batches = await runWithRateLimitRetry(
         () =>
-          Promise.all(
-            variants.map((variant) => fetchJobsVariant(variant.label, variant.query, activeClient, profile)),
+          runInBatches(variants, 2, (variant) =>
+            fetchJobsVariant(variant.label, variant.query, activeClient, profile),
           ),
         1,
       );
@@ -1329,8 +1346,8 @@ export default function Home() {
 
       const batches = await runWithRateLimitRetry(
         () =>
-          Promise.all(
-            tasks.map((task) => fetchSignalsVariant(task.trigger, task.query, activeClient, profile)),
+          runInBatches(tasks, 2, (task) =>
+            fetchSignalsVariant(task.trigger, task.query, activeClient, profile),
           ),
         1,
       );
