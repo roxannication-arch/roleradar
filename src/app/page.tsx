@@ -798,7 +798,12 @@ export default function Home() {
   async function ensureResumeAnalysis(clientSnapshot: Client, force = false, file?: File) {
     const currentFingerprint = buildResumeFingerprint(clientSnapshot, file);
     const cached = resumeAnalysisByClient[clientSnapshot.id];
-    if (!force && cached && cached.sourceFingerprint === currentFingerprint) {
+    if (
+      !force &&
+      cached &&
+      cached.sourceFingerprint === currentFingerprint &&
+      isCacheFresh(cached.timestamp)
+    ) {
       return cached.profile;
     }
 
