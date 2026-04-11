@@ -360,16 +360,40 @@ function extractClaudeText(payload: unknown): string {
   return parts.join("\n").trim();
 }
 
-function extractFirstJsonObject(text: string): string | null {
-  const fenced = text.match(/```json\s*([\s\S]*?)```/i);
-  if (fenced?.[1]) return fenced[1].trim();
-  const firstBrace = text.indexOf("{");
+function extractFromCodeFence(text: string): string | null {
+  const fenceRegex = /```(?:json)?\s*([\s\S]*?)```/gi;
+  let match: RegExpExecArray | null = null;
+  let best: string | null = null;
+  while (true) {
+    match = fenceRegex.exec(text);
+    if (!match) break;
+    const candidate = (match[1] || "").trim();
+    if (!candidate) continue;
+    if (candidate.includes("{") || candidate.includes("[")) {
+      if (!best || candidate.length > best.length) best = candidate;
+    }
+  }
+  return best;
+}
+
+function extractFirstJsonValue(text: string): string | null {
+  const fenced = extractFromCodeFence(text);
+  if (fenced) return fenced;
+
+  const firstBrace = text.search(/[\[{]/);
   if (firstBrace === -1) return null;
   let depth = 0;
   let inString = false;
   let escaped = false;
+  let opening = "";
   for (let i = firstBrace; i < text.length; i += 1) {
     const ch = text[i];
+    if (!opening && (ch === "{" || ch === "[")) {
+      opening = ch;
+      depth = 1;
+      continue;
+    }
+    if (!opening) continue;
     if (inString) {
       if (escaped) {
         escaped = false;
@@ -384,12 +408,32 @@ function extractFirstJsonObject(text: string): string | null {
       inString = true;
       continue;
     }
-    if (ch === "{") depth += 1;
-    if (ch === "}") {
-      depth -= 1;
-      if (depth === 0) {
-        return text.slice(firstBrace, i + 1);
-      }
+    if (ch === "{" || ch === "[") depth += 1;
+    if (ch === "}" || ch === "]") depth -= 1;
+    if (depth === 0) {
+      return text.slice(firstBrace, i + 1).trim();
+    }
+  }
+  return null;
+}
+
+function tryParseJsonCandidate<T>(text: string): T | null {
+  const directCandidate = extractFirstJsonValue(text);
+  const candidates = [directCandidate, text]
+    .filter((item): item is string => Boolean(item))
+    .map((item) => item.trim())
+    .filter(Boolean);
+
+  for (const candidate of candidates) {
+    const normalized = candidate
+      .replace(/^\s*json\s*/i, "")
+      .replace(/[“”]/g, '"')
+      .replace(/[‘’]/g, "'")
+      .replace(/,\s*([}\]])/g, "$1");
+    try {
+      return JSON.parse(normalized) as T;
+    } catch {
+      // Try next candidate.
     }
   }
   return null;
@@ -400,11 +444,36 @@ function parseClaudeJson<T>(payload: unknown): T {
   if (!text) {
     throw new Error("Claude вернул пустой ответ.");
   }
-  const jsonCandidate = extractFirstJsonObject(text);
-  if (!jsonCandidate) {
+  const parsed = tryParseJsonCandidate<T>(text);
+  if (!parsed) {
     throw new Error("Не удалось извлечь JSON из ответа Claude.");
   }
-  return JSON.parse(jsonCandidate) as T;
+  return parsed;
+}
+
+async function parseClaudeJsonWithRepair<T>(payload: unknown, schemaHint: string): Promise<T> {
+  try {
+    return parseClaudeJson<T>(payload);
+  } catch {
+    const rawText = extractClaudeText(payload);
+    if (!rawText) throw new Error("Claude вернул пустой ответ.");
+
+    const repairPrompt = [
+      "Convert the following content into STRICT valid JSON only.",
+      "Do not add explanations, markdown, or comments.",
+      schemaHint,
+      "",
+      "Content to convert:",
+      rawText.slice(0, 16000),
+    ].join("\n");
+
+    const repairPayload = await callClaudeProxy({
+      messages: [{ role: "user", content: [{ type: "text", text: repairPrompt }] }],
+    });
+
+    const repaired = parseClaudeJson<T>(repairPayload);
+    return repaired;
+  }
 }
 
 function scoreTone(score: number): string {
@@ -733,7 +802,10 @@ export default function Home() {
       const payload = await callClaudeProxy({
         messages: [{ role: "user", content: contentBlocks }],
       });
-      const raw = parseClaudeJson<Record<string, unknown>>(payload);
+      const raw = await parseClaudeJsonWithRepair<Record<string, unknown>>(
+        payload,
+        'Expected schema: {"job_titles_current":[],"job_titles_target":[],"total_years_experience":number|null,"top_10_skills":[],"industries":[],"seniority_level":"string","location":"string","preferred_company_size":"string"}',
+      );
       const profile = normalizeResumeProfile(raw, clientSnapshot.location || "United States");
 
       setResumeAnalysisByClient((prev) => ({
@@ -911,7 +983,10 @@ export default function Home() {
       tools: [WEB_SEARCH_TOOL],
     });
 
-    const parsed = parseClaudeJson<{ jobs?: unknown[] }>(payload);
+    const parsed = await parseClaudeJsonWithRepair<{ jobs?: unknown[] }>(
+      payload,
+      'Expected schema: {"jobs":[{"title":"string","company":"string","location":"string","url":"https://...","posted_at":"string","company_size":"startup|scaleup|enterprise|unknown","reason":"string","hiring_contact_role":"string","outreach_message":"string"}]}',
+    );
     const jobsRaw = Array.isArray(parsed.jobs) ? parsed.jobs : [];
     return jobsRaw.reduce<Omit<JobItem, "id" | "fitScore" | "fitReason" | "status">[]>(
       (acc, raw) => {
@@ -1142,7 +1217,10 @@ export default function Home() {
       tools: [WEB_SEARCH_TOOL],
     });
 
-    const parsed = parseClaudeJson<{ signals?: unknown[] }>(payload);
+    const parsed = await parseClaudeJsonWithRepair<{ signals?: unknown[] }>(
+      payload,
+      'Expected schema: {"signals":[{"company":"string","trigger_type":"funding|expansion|key_hire|contract","priority":"hot|warm|cold","hiring_manager":"string","evidence":"string","source_url":"https://...","outreach_message":"string"}]}',
+    );
     const signalRaw = Array.isArray(parsed.signals) ? parsed.signals : [];
     return signalRaw.reduce<Omit<GrowthSignal, "id" | "status">[]>((acc, raw) => {
       const item = (raw || {}) as Record<string, unknown>;
