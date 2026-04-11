@@ -8,6 +8,7 @@ type OutreachStatus = "Найдено" | "Outreach отправлен" | "Отв
 type WorkspaceTab = "jobs" | "signals";
 type SignalTrigger = "funding" | "expansion" | "key_hire" | "contract";
 type SignalPriority = "hot" | "warm" | "cold";
+type RunMode = "economy" | "standard";
 
 type Client = {
   id: string;
@@ -125,6 +126,7 @@ const ACTIVE_CLIENT_STORAGE_KEY = "roleradar.active-client-id.v2";
 const RESUME_ANALYSIS_STORAGE_KEY = "roleradar.resume-analysis.v1";
 const JOBS_CACHE_STORAGE_KEY = "roleradar.jobs-cache.v1";
 const SIGNALS_CACHE_STORAGE_KEY = "roleradar.signals-cache.v1";
+const RUN_MODE_STORAGE_KEY = "roleradar.run-mode.v1";
 
 const INITIAL_CLIENTS: Client[] = [
   {
@@ -305,10 +307,21 @@ function loadMapFromStorage<T>(key: string): Record<string, T> {
   }
 }
 
+function loadRunModeFromStorage(): RunMode {
+  if (typeof window === "undefined") return "economy";
+  try {
+    const stored = window.localStorage.getItem(RUN_MODE_STORAGE_KEY);
+    return stored === "standard" ? "standard" : "economy";
+  } catch {
+    return "economy";
+  }
+}
+
 function safeSetLocalStorage(key: string, value: unknown) {
   if (typeof window === "undefined") return;
   try {
-    window.localStorage.setItem(key, JSON.stringify(value));
+    const serialized = typeof value === "string" ? value : JSON.stringify(value);
+    window.localStorage.setItem(key, serialized);
   } catch {
     // localStorage can fail (e.g. quota exceeded); keep UI functional.
   }
@@ -658,6 +671,8 @@ export default function Home() {
   const [isResumeAnalyzing, setIsResumeAnalyzing] = useState(false);
   const [isJobsLoading, setIsJobsLoading] = useState(false);
   const [isSignalsLoading, setIsSignalsLoading] = useState(false);
+  const [activeRun, setActiveRun] = useState<"none" | "jobs" | "signals">("none");
+  const [runMode, setRunMode] = useState<RunMode>(() => loadRunModeFromStorage());
   const [workspaceTab, setWorkspaceTab] = useState<WorkspaceTab>("jobs");
   const [resumeAnalysisByClient, setResumeAnalysisByClient] = useState<
     Record<string, ResumeAnalysisEntry>
@@ -708,6 +723,10 @@ export default function Home() {
   useEffect(() => {
     safeSetLocalStorage(SIGNALS_CACHE_STORAGE_KEY, signalsCacheByClient);
   }, [signalsCacheByClient]);
+
+  useEffect(() => {
+    safeSetLocalStorage(RUN_MODE_STORAGE_KEY, runMode);
+  }, [runMode]);
 
   const pipelineSummary = useMemo(() => {
     const jobsFound = activeJobs.length;
@@ -1156,7 +1175,12 @@ export default function Home() {
 
   async function runJobsEngine(forceRefresh: boolean) {
     if (!activeClient) return;
+    if (activeRun !== "none") {
+      setJobsError("Сейчас уже выполняется другой запуск. Дождитесь завершения.");
+      return;
+    }
     setJobsError("");
+    setActiveRun("jobs");
     setIsJobsLoading(true);
     try {
       const cached = jobsCacheByClient[activeClient.id];
@@ -1165,7 +1189,18 @@ export default function Home() {
       }
 
       const profile = await ensureResumeAnalysis(activeClient, false);
-      const variants = [
+      const variants = runMode === "economy" ? [
+        {
+          label: "По title",
+          query: `Exact title search for "${activeClient.targetRole || profile.jobTitlesTarget[0] || "candidate role"}"`,
+        },
+        {
+          label: "По локации + role",
+          query: `Location + role search: ${activeClient.location || profile.location || "United States"} and ${
+            activeClient.targetRole || profile.jobTitlesTarget[0] || "candidate role"
+          }`,
+        },
+      ] : [
         {
           label: "По title",
           query: `Exact title search for "${activeClient.targetRole || profile.jobTitlesTarget[0] || "candidate role"}"`,
@@ -1207,7 +1242,7 @@ export default function Home() {
       ).map((url) => batches.flat().find((item) => normalizeJobUrl(item.url) === url)!);
 
       let extraAttempt = 0;
-      while (merged.length < 25 && extraAttempt < 1) {
+      while (runMode === "standard" && merged.length < 25 && extraAttempt < 1) {
         extraAttempt += 1;
         const extraSettled = await runInBatchesSettled(
           [
@@ -1242,7 +1277,8 @@ export default function Home() {
         })
         .sort((a, b) => b.fitScore - a.fitScore);
 
-      const finalJobs = scored.slice(0, Math.min(60, Math.max(10, scored.length)));
+      const minDesired = runMode === "economy" ? 6 : 10;
+      const finalJobs = scored.slice(0, Math.min(60, Math.max(minDesired, scored.length)));
       if (!finalJobs.length) {
         throw new Error("Claude не вернул вакансии. Попробуйте обновить анализ.");
       }
@@ -1261,6 +1297,7 @@ export default function Home() {
       setJobsError(humanizeClaudeError(error));
     } finally {
       setIsJobsLoading(false);
+      setActiveRun("none");
     }
   }
 
@@ -1329,7 +1366,12 @@ export default function Home() {
 
   async function runSignalsEngine(forceRefresh: boolean) {
     if (!activeClient) return;
+    if (activeRun !== "none") {
+      setSignalsError("Сейчас уже выполняется другой запуск. Дождитесь завершения.");
+      return;
+    }
     setSignalsError("");
+    setActiveRun("signals");
     setIsSignalsLoading(true);
     try {
       const cached = signalsCacheByClient[activeClient.id];
@@ -1338,7 +1380,20 @@ export default function Home() {
       }
 
       const profile = await ensureResumeAnalysis(activeClient, false);
-      const tasks: { trigger: SignalTrigger; query: string }[] = [
+      const tasks: { trigger: SignalTrigger; query: string }[] = runMode === "economy"
+        ? [
+            {
+              trigger: "funding",
+              query: `Funding rounds in last 90 days for industries: ${profile.industries.join(", ") || "technology"}`,
+            },
+            {
+              trigger: "key_hire",
+              query: `New VP or Director hires in last 60 days in companies relevant to ${
+                activeClient.targetRole || profile.jobTitlesTarget[0] || "candidate profile"
+              }`,
+            },
+          ]
+        : [
         {
           trigger: "funding",
           query: `Funding rounds in last 90 days for industries: ${profile.industries.join(", ") || "technology"}`,
@@ -1413,6 +1468,7 @@ export default function Home() {
       setSignalsError(humanizeClaudeError(error));
     } finally {
       setIsSignalsLoading(false);
+      setActiveRun("none");
     }
   }
 
@@ -1608,12 +1664,46 @@ export default function Home() {
                 <p className="mt-1 text-xs text-slate-400">
                   Вакансии/сигналы кэшируются на 24 часа по client ID в localStorage.
                 </p>
+                <div className="mt-2 flex items-center gap-2">
+                  <span className="text-xs text-slate-500">Режим запуска:</span>
+                  <button
+                    type="button"
+                    onClick={() => setRunMode("economy")}
+                    className={`rounded-md px-2.5 py-1 text-xs font-semibold transition ${
+                      runMode === "economy"
+                        ? "bg-emerald-100 text-emerald-800"
+                        : "bg-slate-100 text-slate-600 hover:bg-slate-200"
+                    }`}
+                  >
+                    Эконом
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setRunMode("standard")}
+                    className={`rounded-md px-2.5 py-1 text-xs font-semibold transition ${
+                      runMode === "standard"
+                        ? "bg-blue-100 text-blue-800"
+                        : "bg-slate-100 text-slate-600 hover:bg-slate-200"
+                    }`}
+                  >
+                    Стандарт
+                  </button>
+                  <span className="text-xs text-slate-400">
+                    {runMode === "economy" ? "меньше запросов, выше стабильность" : "полный охват"}
+                  </span>
+                </div>
+                {activeRun !== "none" ? (
+                  <p className="mt-1 text-xs font-medium text-amber-700">
+                    Выполняется {activeRun === "jobs" ? "поиск вакансий" : "поиск сигналов"} — новые
+                    запуски временно заблокированы.
+                  </p>
+                ) : null}
               </div>
               <div className="flex flex-wrap items-center gap-2">
                 <button
                   type="button"
                   onClick={() => void runJobsEngine(false)}
-                  disabled={isJobsLoading}
+                  disabled={isJobsLoading || activeRun === "signals"}
                   className="inline-flex h-11 items-center justify-center rounded-xl bg-slate-900 px-5 text-sm font-medium text-white shadow-sm transition hover:bg-slate-800 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-slate-200 active:translate-y-px disabled:cursor-wait disabled:opacity-70"
                 >
                   {isJobsLoading ? "Ищем вакансии..." : "Запустить анализ"}
@@ -1621,7 +1711,7 @@ export default function Home() {
                 <button
                   type="button"
                   onClick={() => void runJobsEngine(true)}
-                  disabled={isJobsLoading}
+                  disabled={isJobsLoading || activeRun === "signals"}
                   className="inline-flex h-11 items-center justify-center rounded-xl border border-slate-300 bg-white px-5 text-sm font-medium text-slate-800 shadow-sm transition hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-slate-200 active:translate-y-px disabled:opacity-70"
                 >
                   Обновить
@@ -1906,7 +1996,7 @@ export default function Home() {
                     <button
                       type="button"
                       onClick={() => void runJobsEngine(false)}
-                      disabled={isJobsLoading}
+                      disabled={isJobsLoading || activeRun === "signals"}
                       className="inline-flex h-10 items-center justify-center rounded-xl bg-slate-900 px-4 text-sm font-medium text-white transition hover:bg-slate-800 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-slate-200 disabled:opacity-70"
                     >
                       {isJobsLoading ? "Загрузка..." : "Запустить"}
@@ -1914,7 +2004,7 @@ export default function Home() {
                     <button
                       type="button"
                       onClick={() => void runJobsEngine(true)}
-                      disabled={isJobsLoading}
+                      disabled={isJobsLoading || activeRun === "signals"}
                       className="inline-flex h-10 items-center justify-center rounded-xl border border-slate-300 bg-white px-4 text-sm font-medium text-slate-700 transition hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-slate-200 disabled:opacity-70"
                     >
                       Обновить
@@ -1925,7 +2015,7 @@ export default function Home() {
                     <button
                       type="button"
                       onClick={() => void runSignalsEngine(false)}
-                      disabled={isSignalsLoading}
+                      disabled={isSignalsLoading || activeRun === "jobs"}
                       className="inline-flex h-10 items-center justify-center rounded-xl bg-slate-900 px-4 text-sm font-medium text-white transition hover:bg-slate-800 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-slate-200 disabled:opacity-70"
                     >
                       {isSignalsLoading ? "Загрузка..." : "Запустить сигналы"}
@@ -1933,7 +2023,7 @@ export default function Home() {
                     <button
                       type="button"
                       onClick={() => void runSignalsEngine(true)}
-                      disabled={isSignalsLoading}
+                      disabled={isSignalsLoading || activeRun === "jobs"}
                       className="inline-flex h-10 items-center justify-center rounded-xl border border-slate-300 bg-white px-4 text-sm font-medium text-slate-700 transition hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-slate-200 disabled:opacity-70"
                     >
                       Обновить
