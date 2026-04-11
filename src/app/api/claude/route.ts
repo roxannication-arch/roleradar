@@ -4,9 +4,9 @@ const ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_MODEL = "claude-sonnet-4-20250514";
 const ANTHROPIC_VERSION = "2023-06-01";
 const DEFAULT_MAX_TOKENS = 1000;
-const MAX_RETRIES = 1;
+const MAX_RETRIES = 0;
 const BASE_RETRY_DELAY_MS = 1500;
-const UPSTREAM_TIMEOUT_MS = 30000;
+const UPSTREAM_TIMEOUT_MS = 7500;
 
 type ClaudeProxyRequest = {
   messages?: unknown;

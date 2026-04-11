@@ -480,52 +480,38 @@ async function parseClaudeJsonWithRepair<T>(payload: unknown, schemaHint: string
   }
 }
 
-function isRateLimitError(error: unknown): boolean {
-  if (!(error instanceof Error)) return false;
-  const message = error.message.toLowerCase();
-  return message.includes("rate limit") || message.includes("429");
-}
-
 function humanizeClaudeError(error: unknown): string {
   if (!(error instanceof Error)) {
     return "Не удалось выполнить запрос к Claude.";
   }
-  if (isRateLimitError(error)) {
+  if (error.message.toLowerCase().includes("rate limit") || error.message.includes("429")) {
     return "Claude временно ограничил запросы. Подождите 30–60 секунд и нажмите «Запустить» снова.";
   }
   return error.message;
 }
 
-async function runWithRateLimitRetry<T>(task: () => Promise<T>, retries = 1): Promise<T> {
-  let attempt = 0;
-  while (true) {
-    try {
-      return await task();
-    } catch (error) {
-      if (!isRateLimitError(error) || attempt >= retries) {
-        throw error;
-      }
-      attempt += 1;
-      await sleep(5000 * attempt);
-    }
-  }
-}
-
-async function runInBatches<TInput, TOutput>(
+async function runInBatchesSettled<TInput, TOutput>(
   items: TInput[],
   batchSize: number,
   worker: (item: TInput) => Promise<TOutput>,
-): Promise<TOutput[]> {
-  const results: TOutput[] = [];
+): Promise<{ fulfilled: TOutput[]; failed: number }> {
+  const fulfilled: TOutput[] = [];
+  let failed = 0;
   for (let i = 0; i < items.length; i += batchSize) {
     const chunk = items.slice(i, i + batchSize);
-    const chunkResults = await Promise.all(chunk.map((item) => worker(item)));
-    results.push(...chunkResults);
+    const chunkResults = await Promise.allSettled(chunk.map((item) => worker(item)));
+    for (const result of chunkResults) {
+      if (result.status === "fulfilled") {
+        fulfilled.push(result.value);
+      } else {
+        failed += 1;
+      }
+    }
     if (i + batchSize < items.length) {
       await sleep(1200);
     }
   }
-  return results;
+  return { fulfilled, failed };
 }
 
 function scoreTone(score: number): string {
@@ -1206,31 +1192,39 @@ export default function Home() {
         },
       ];
 
-      const batches = await runWithRateLimitRetry(
-        () =>
-          runInBatches(variants, 2, (variant) =>
-            fetchJobsVariant(variant.label, variant.query, activeClient, profile),
-          ),
-        1,
+      const settledBatches = await runInBatchesSettled(
+        variants,
+        2,
+        (variant) => fetchJobsVariant(variant.label, variant.query, activeClient, profile),
       );
+      const batches = settledBatches.fulfilled;
+      if (!batches.length) {
+        throw new Error("Не удалось получить ответы Claude по вакансиям. Попробуйте «Обновить» через минуту.");
+      }
 
       let merged = unique(
         batches.flat().map((item) => normalizeJobUrl(item.url)),
       ).map((url) => batches.flat().find((item) => normalizeJobUrl(item.url) === url)!);
 
       let extraAttempt = 0;
-      while (merged.length < 25 && extraAttempt < 3) {
+      while (merged.length < 25 && extraAttempt < 1) {
         extraAttempt += 1;
-        const extraBatch = await fetchJobsVariant(
-          `Расширенный поиск #${extraAttempt}`,
-          `Broader US search for ${activeClient.targetRole || profile.jobTitlesTarget[0] || "target role"} with candidate skills ${
-            profile.topSkills.slice(0, 5).join(", ") || "general"
-          }`,
-          activeClient,
-          profile,
+        const extraSettled = await runInBatchesSettled(
+          [
+            {
+              label: `Расширенный поиск #${extraAttempt}`,
+              query: `Broader US search for ${
+                activeClient.targetRole || profile.jobTitlesTarget[0] || "target role"
+              } with candidate skills ${profile.topSkills.slice(0, 5).join(", ") || "general"}`,
+            },
+          ],
+          1,
+          (variant) => fetchJobsVariant(variant.label, variant.query, activeClient, profile),
         );
-        merged = unique([...merged, ...extraBatch].map((item) => normalizeJobUrl(item.url))).map(
-          (url) => [...merged, ...extraBatch].find((item) => normalizeJobUrl(item.url) === url)!,
+        const extraBatch = extraSettled.fulfilled.flat();
+        if (!extraBatch.length) break;
+        merged = unique([...merged, ...extraBatch].map((item) => normalizeJobUrl(item.url))).map((url) =>
+          [...merged, ...extraBatch].find((item) => normalizeJobUrl(item.url) === url)!,
         );
       }
 
@@ -1248,7 +1242,7 @@ export default function Home() {
         })
         .sort((a, b) => b.fitScore - a.fitScore);
 
-      const finalJobs = scored.slice(0, Math.min(60, Math.max(25, scored.length)));
+      const finalJobs = scored.slice(0, Math.min(60, Math.max(10, scored.length)));
       if (!finalJobs.length) {
         throw new Error("Claude не вернул вакансии. Попробуйте обновить анализ.");
       }
@@ -1258,6 +1252,11 @@ export default function Home() {
         [activeClient.id]: { items: finalJobs, timestamp: Date.now() },
       }));
       updateActiveClient({ lastAnalyzedAt: new Date().toISOString().slice(0, 10) });
+      if (settledBatches.failed > 0) {
+        setJobsError(
+          `Часть источников недоступна (${settledBatches.failed}/${variants.length}), показаны частичные результаты.`,
+        );
+      }
     } catch (error) {
       setJobsError(humanizeClaudeError(error));
     } finally {
@@ -1360,13 +1359,13 @@ export default function Home() {
         },
       ];
 
-      const batches = await runWithRateLimitRetry(
-        () =>
-          runInBatches(tasks, 2, (task) =>
-            fetchSignalsVariant(task.trigger, task.query, activeClient, profile),
-          ),
-        1,
+      const settledBatches = await runInBatchesSettled(tasks, 2, (task) =>
+        fetchSignalsVariant(task.trigger, task.query, activeClient, profile),
       );
+      const batches = settledBatches.fulfilled;
+      if (!batches.length) {
+        throw new Error("Не удалось получить ответы Claude по сигналам. Попробуйте «Обновить» через минуту.");
+      }
 
       const merged = unique(
         batches.flat().map((signal) => `${signal.company}|${signal.triggerType}|${normalizeJobUrl(signal.sourceUrl)}`),
@@ -1405,6 +1404,11 @@ export default function Home() {
           timestamp: Date.now(),
         },
       }));
+      if (settledBatches.failed > 0) {
+        setSignalsError(
+          `Часть источников сигналов недоступна (${settledBatches.failed}/${tasks.length}), показаны частичные результаты.`,
+        );
+      }
     } catch (error) {
       setSignalsError(humanizeClaudeError(error));
     } finally {
