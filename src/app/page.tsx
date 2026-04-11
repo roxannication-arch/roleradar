@@ -538,8 +538,8 @@ export default function Home() {
   const activeResumeAnalysis = activeClient ? resumeAnalysisByClient[activeClient.id] : undefined;
   const activeJobsCache = activeClient ? jobsCacheByClient[activeClient.id] : undefined;
   const activeSignalsCache = activeClient ? signalsCacheByClient[activeClient.id] : undefined;
-  const activeJobs = activeJobsCache?.items || [];
-  const activeSignals = activeSignalsCache?.items || [];
+  const activeJobs = useMemo(() => activeJobsCache?.items ?? [], [activeJobsCache]);
+  const activeSignals = useMemo(() => activeSignalsCache?.items ?? [], [activeSignalsCache]);
 
   useEffect(() => {
     if (!clients.length) return;
@@ -847,7 +847,7 @@ export default function Home() {
       `Candidate target role: ${clientSnapshot.targetRole || profile.jobTitlesTarget.join(", ") || "unknown"}`,
       `Candidate location: ${clientSnapshot.location || profile.location || "United States"}`,
       `Candidate seniority: ${profile.seniorityLevel || clientSnapshot.candidateLevel}`,
-      `Years of experience: ${profile.totalYearsExperience ?? clientSnapshot.experienceYears || "unknown"}`,
+      `Years of experience: ${(profile.totalYearsExperience ?? clientSnapshot.experienceYears) || "unknown"}`,
       `Top skills: ${profile.topSkills.join(", ") || "unknown"}`,
       `Industries: ${profile.industries.join(", ") || "unknown"}`,
       `Preferred company size: ${clientSnapshot.preferredCompanySizes.join(", ")}`,
@@ -892,14 +892,14 @@ export default function Home() {
 
     const parsed = parseClaudeJson<{ jobs?: unknown[] }>(payload);
     const jobsRaw = Array.isArray(parsed.jobs) ? parsed.jobs : [];
-    return jobsRaw
-      .map((raw) => {
+    return jobsRaw.reduce<Omit<JobItem, "id" | "fitScore" | "fitReason" | "status">[]>(
+      (acc, raw) => {
         const item = (raw || {}) as Record<string, unknown>;
         const url = typeof item.url === "string" ? normalizeJobUrl(item.url) : "";
-        if (!url.startsWith("http")) return null;
+        if (!url.startsWith("http")) return acc;
         const title = typeof item.title === "string" ? item.title.trim() : "";
         const company = typeof item.company === "string" ? item.company.trim() : "";
-        if (!title || !company) return null;
+        if (!title || !company) return acc;
         const location = typeof item.location === "string" ? item.location.trim() : "United States";
         const postedAt = typeof item.posted_at === "string" ? item.posted_at : undefined;
         const evidence =
@@ -914,7 +914,7 @@ export default function Home() {
           typeof item.outreach_message === "string" && item.outreach_message.trim()
             ? item.outreach_message.trim()
             : `Hi, I noticed the ${title} opening at ${company}. I have relevant experience and would love to connect about this opportunity.`;
-        return {
+        acc.push({
           title,
           company,
           location,
@@ -925,9 +925,11 @@ export default function Home() {
           hiringContactRole,
           evidence,
           outreachMessage,
-        };
-      })
-      .filter((item): item is Omit<JobItem, "id" | "fitScore" | "fitReason" | "status"> => item !== null);
+        });
+        return acc;
+      },
+      [],
+    );
   }
 
   function scoreJobFit(
@@ -958,8 +960,7 @@ export default function Home() {
         ? detectSeniorityBand(profile.seniorityLevel)
         : clientSnapshot.candidateLevel;
     const jobBand = detectSeniorityBand(job.title);
-    const seniorityMatched =
-      candidateBand === "auto" ? true : candidateBand === "senior" ? true : candidateBand === jobBand;
+    const seniorityMatched = candidateBand === "senior" ? true : candidateBand === jobBand;
 
     const sizeMatched =
       job.companySize === "unknown" || clientSnapshot.preferredCompanySizes.includes(job.companySize);
@@ -1122,29 +1123,28 @@ export default function Home() {
 
     const parsed = parseClaudeJson<{ signals?: unknown[] }>(payload);
     const signalRaw = Array.isArray(parsed.signals) ? parsed.signals : [];
-    return signalRaw
-      .map((raw) => {
-        const item = (raw || {}) as Record<string, unknown>;
-        const company = typeof item.company === "string" ? item.company.trim() : "";
-        const sourceUrl = typeof item.source_url === "string" ? normalizeJobUrl(item.source_url) : "";
-        if (!company || !sourceUrl.startsWith("http")) return null;
-        const triggerType = parseSignalTrigger(item.trigger_type);
-        const priority = parseSignalPriority(item.priority);
-        const hiringManager =
-          typeof item.hiring_manager === "string" && item.hiring_manager.trim()
-            ? item.hiring_manager.trim()
-            : "Hiring Manager";
-        const evidence =
-          typeof item.evidence === "string" && item.evidence.trim()
-            ? item.evidence.trim()
-            : "Growth signal detected from public sources.";
-        const outreachMessage =
-          typeof item.outreach_message === "string" && item.outreach_message.trim()
-            ? item.outreach_message.trim()
-            : `Hi, I noticed your recent growth milestone at ${company}. I work on similar challenges and would love to connect if your team is hiring.`;
-        return { company, triggerType, priority, hiringManager, evidence, sourceUrl, outreachMessage };
-      })
-      .filter((item): item is Omit<GrowthSignal, "id" | "status"> => item !== null);
+    return signalRaw.reduce<Omit<GrowthSignal, "id" | "status">[]>((acc, raw) => {
+      const item = (raw || {}) as Record<string, unknown>;
+      const company = typeof item.company === "string" ? item.company.trim() : "";
+      const sourceUrl = typeof item.source_url === "string" ? normalizeJobUrl(item.source_url) : "";
+      if (!company || !sourceUrl.startsWith("http")) return acc;
+      const triggerType = parseSignalTrigger(item.trigger_type);
+      const priority = parseSignalPriority(item.priority);
+      const hiringManager =
+        typeof item.hiring_manager === "string" && item.hiring_manager.trim()
+          ? item.hiring_manager.trim()
+          : "Hiring Manager";
+      const evidence =
+        typeof item.evidence === "string" && item.evidence.trim()
+          ? item.evidence.trim()
+          : "Growth signal detected from public sources.";
+      const outreachMessage =
+        typeof item.outreach_message === "string" && item.outreach_message.trim()
+          ? item.outreach_message.trim()
+          : `Hi, I noticed your recent growth milestone at ${company}. I work on similar challenges and would love to connect if your team is hiring.`;
+      acc.push({ company, triggerType, priority, hiringManager, evidence, sourceUrl, outreachMessage });
+      return acc;
+    }, []);
   }
 
   async function runSignalsEngine(forceRefresh: boolean) {
