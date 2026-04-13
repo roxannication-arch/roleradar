@@ -8,7 +8,6 @@ type OutreachStatus = "Найдено" | "Outreach отправлен" | "Отв
 type WorkspaceTab = "jobs" | "signals";
 type SignalTrigger = "funding" | "expansion" | "key_hire" | "contract";
 type SignalPriority = "hot" | "warm" | "cold";
-type RunMode = "economy" | "standard";
 
 type Client = {
   id: string;
@@ -145,7 +144,6 @@ const ACTIVE_CLIENT_STORAGE_KEY = "roleradar.active-client-id.v2";
 const RESUME_ANALYSIS_STORAGE_KEY = "roleradar.resume-analysis.v1";
 const JOBS_CACHE_STORAGE_KEY = "roleradar.jobs-cache.v1";
 const SIGNALS_CACHE_STORAGE_KEY = "roleradar.signals-cache.v1";
-const RUN_MODE_STORAGE_KEY = "roleradar.run-mode.v1";
 
 const INITIAL_CLIENTS: Client[] = [
   {
@@ -324,16 +322,6 @@ function loadMapFromStorage<T>(key: string): Record<string, T> {
     return parsed as Record<string, T>;
   } catch {
     return {};
-  }
-}
-
-function loadRunModeFromStorage(): RunMode {
-  if (typeof window === "undefined") return "economy";
-  try {
-    const stored = window.localStorage.getItem(RUN_MODE_STORAGE_KEY);
-    return stored === "standard" ? "standard" : "economy";
-  } catch {
-    return "economy";
   }
 }
 
@@ -691,8 +679,6 @@ export default function Home() {
   const [isResumeAnalyzing, setIsResumeAnalyzing] = useState(false);
   const [isJobsLoading, setIsJobsLoading] = useState(false);
   const [isSignalsLoading, setIsSignalsLoading] = useState(false);
-  const [activeRun, setActiveRun] = useState<"none" | "jobs" | "signals">("none");
-  const [runMode, setRunMode] = useState<RunMode>(() => loadRunModeFromStorage());
   const [workspaceTab, setWorkspaceTab] = useState<WorkspaceTab>("jobs");
   const [resumeAnalysisByClient, setResumeAnalysisByClient] = useState<
     Record<string, ResumeAnalysisEntry>
@@ -743,10 +729,6 @@ export default function Home() {
   useEffect(() => {
     safeSetLocalStorage(SIGNALS_CACHE_STORAGE_KEY, signalsCacheByClient);
   }, [signalsCacheByClient]);
-
-  useEffect(() => {
-    safeSetLocalStorage(RUN_MODE_STORAGE_KEY, runMode);
-  }, [runMode]);
 
   const pipelineSummary = useMemo(() => {
     const jobsFound = activeJobs.length;
@@ -1277,12 +1259,7 @@ export default function Home() {
 
   async function runJobsEngine(forceRefresh: boolean) {
     if (!activeClient) return;
-    if (activeRun !== "none") {
-      setJobsError("Сейчас уже выполняется другой запуск. Дождитесь завершения.");
-      return;
-    }
     setJobsError("");
-    setActiveRun("jobs");
     setIsJobsLoading(true);
     try {
       const cached = jobsCacheByClient[activeClient.id];
@@ -1291,18 +1268,7 @@ export default function Home() {
       }
 
       const profile = await ensureResumeAnalysis(activeClient, false);
-      const variants = runMode === "economy" ? [
-        {
-          label: "По title",
-          query: `Exact title search for "${activeClient.targetRole || profile.jobTitlesTarget[0] || "candidate role"}"`,
-        },
-        {
-          label: "По локации + role",
-          query: `Location + role search: ${activeClient.location || profile.location || "United States"} and ${
-            activeClient.targetRole || profile.jobTitlesTarget[0] || "candidate role"
-          }`,
-        },
-      ] : [
+      const variants = [
         {
           label: "По title",
           query: `Exact title search for "${activeClient.targetRole || profile.jobTitlesTarget[0] || "candidate role"}"`,
@@ -1344,7 +1310,7 @@ export default function Home() {
       ).map((url) => batches.flat().find((item) => normalizeJobUrl(item.url) === url)!);
 
       let extraAttempt = 0;
-      while (runMode === "standard" && merged.length < 25 && extraAttempt < 1) {
+      while (merged.length < 25 && extraAttempt < 1) {
         extraAttempt += 1;
         const extraSettled = await runInBatchesSettled(
           [
@@ -1379,7 +1345,7 @@ export default function Home() {
         })
         .sort((a, b) => b.fitScore - a.fitScore);
 
-      const minDesired = runMode === "economy" ? 6 : 10;
+      const minDesired = 10;
       const finalJobs = scored.slice(0, Math.min(60, Math.max(minDesired, scored.length)));
       if (!finalJobs.length) {
         throw new Error("Claude не вернул вакансии. Попробуйте обновить анализ.");
@@ -1413,7 +1379,6 @@ export default function Home() {
       }
     } finally {
       setIsJobsLoading(false);
-      setActiveRun("none");
     }
   }
 
@@ -1482,12 +1447,7 @@ export default function Home() {
 
   async function runSignalsEngine(forceRefresh: boolean) {
     if (!activeClient) return;
-    if (activeRun !== "none") {
-      setSignalsError("Сейчас уже выполняется другой запуск. Дождитесь завершения.");
-      return;
-    }
     setSignalsError("");
-    setActiveRun("signals");
     setIsSignalsLoading(true);
     try {
       const cached = signalsCacheByClient[activeClient.id];
@@ -1496,20 +1456,7 @@ export default function Home() {
       }
 
       const profile = await ensureResumeAnalysis(activeClient, false);
-      const tasks: { trigger: SignalTrigger; query: string }[] = runMode === "economy"
-        ? [
-            {
-              trigger: "funding",
-              query: `Funding rounds in last 90 days for industries: ${profile.industries.join(", ") || "technology"}`,
-            },
-            {
-              trigger: "key_hire",
-              query: `New VP or Director hires in last 60 days in companies relevant to ${
-                activeClient.targetRole || profile.jobTitlesTarget[0] || "candidate profile"
-              }`,
-            },
-          ]
-        : [
+      const tasks: { trigger: SignalTrigger; query: string }[] = [
         {
           trigger: "funding",
           query: `Funding rounds in last 90 days for industries: ${profile.industries.join(", ") || "technology"}`,
@@ -1602,7 +1549,6 @@ export default function Home() {
       }
     } finally {
       setIsSignalsLoading(false);
-      setActiveRun("none");
     }
   }
 
@@ -1685,12 +1631,12 @@ export default function Home() {
   }
 
   const metrics = [
-    { label: "Найдено вакансий", value: pipelineSummary.jobsFound, hint: "через Claude + web_search" },
+    { label: "Найдено вакансий", value: pipelineSummary.jobsFound, hint: "по текущему поиску" },
     { label: "High-fit вакансий", value: pipelineSummary.highMatches, hint: "fit score 80+" },
-    { label: "Сигналы роста", value: pipelineSummary.signalsFound, hint: "funding/expansion/hire/contract" },
+    { label: "Сигналы роста", value: pipelineSummary.signalsFound, hint: "компании с признаками найма" },
     { label: "Найдено контактов", value: pipelineSummary.contactsFound, hint: "по вакансиям и сигналам" },
-    { label: "Outreach отправлено", value: pipelineSummary.outreachSent, hint: "ручной трекер статусов" },
-    { label: "Ответов получено", value: pipelineSummary.responses, hint: "этап 3+" },
+    { label: "Outreach отправлено", value: pipelineSummary.outreachSent, hint: "по статусам" },
+    { label: "Ответов получено", value: pipelineSummary.responses, hint: "по статусам" },
     { label: "Конверсия", value: `${pipelineSummary.conversion}%`, hint: "ответы / outreach" },
   ];
 
@@ -1708,7 +1654,7 @@ export default function Home() {
             </p>
             <h1 className="mt-2 text-2xl font-semibold tracking-tight">Клиентский workspace</h1>
             <p className="mt-1 text-sm text-slate-500">
-              Claude-powered pipeline для команды карьерных консультантов.
+              Операционный pipeline для команды карьерных консультантов.
             </p>
             <div className="mt-5 flex items-center gap-2">
               <input
@@ -1795,49 +1741,12 @@ export default function Home() {
                   {activeClient.targetRole || "Роль не задана"} ·{" "}
                   {activeClient.location || "Локация не задана"}
                 </p>
-                <p className="mt-1 text-xs text-slate-400">
-                  Вакансии/сигналы кэшируются на 24 часа по client ID в localStorage.
-                </p>
-                <div className="mt-2 flex items-center gap-2">
-                  <span className="text-xs text-slate-500">Режим запуска:</span>
-                  <button
-                    type="button"
-                    onClick={() => setRunMode("economy")}
-                    className={`rounded-md px-2.5 py-1 text-xs font-semibold transition ${
-                      runMode === "economy"
-                        ? "bg-emerald-100 text-emerald-800"
-                        : "bg-slate-100 text-slate-600 hover:bg-slate-200"
-                    }`}
-                  >
-                    Эконом
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setRunMode("standard")}
-                    className={`rounded-md px-2.5 py-1 text-xs font-semibold transition ${
-                      runMode === "standard"
-                        ? "bg-blue-100 text-blue-800"
-                        : "bg-slate-100 text-slate-600 hover:bg-slate-200"
-                    }`}
-                  >
-                    Стандарт
-                  </button>
-                  <span className="text-xs text-slate-400">
-                    {runMode === "economy" ? "меньше запросов, выше стабильность" : "полный охват"}
-                  </span>
-                </div>
-                {activeRun !== "none" ? (
-                  <p className="mt-1 text-xs font-medium text-amber-700">
-                    Выполняется {activeRun === "jobs" ? "поиск вакансий" : "поиск сигналов"} — новые
-                    запуски временно заблокированы.
-                  </p>
-                ) : null}
               </div>
               <div className="flex flex-wrap items-center gap-2">
                 <button
                   type="button"
                   onClick={() => void runJobsEngine(false)}
-                  disabled={isJobsLoading || activeRun === "signals"}
+                  disabled={isJobsLoading}
                   className="inline-flex h-11 items-center justify-center rounded-xl bg-slate-900 px-5 text-sm font-medium text-white shadow-sm transition hover:bg-slate-800 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-slate-200 active:translate-y-px disabled:cursor-wait disabled:opacity-70"
                 >
                   {isJobsLoading ? "Ищем вакансии..." : "Запустить анализ"}
@@ -1845,7 +1754,7 @@ export default function Home() {
                 <button
                   type="button"
                   onClick={() => void runJobsEngine(true)}
-                  disabled={isJobsLoading || activeRun === "signals"}
+                  disabled={isJobsLoading}
                   className="inline-flex h-11 items-center justify-center rounded-xl border border-slate-300 bg-white px-5 text-sm font-medium text-slate-800 shadow-sm transition hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-slate-200 active:translate-y-px disabled:opacity-70"
                 >
                   Обновить
@@ -1866,9 +1775,6 @@ export default function Home() {
               <div className="flex items-center justify-between gap-3">
                 <div>
                   <h3 className="text-lg font-semibold">Анализ резюме</h3>
-                  <p className="mt-1 text-sm text-slate-500">
-                    Загрузка резюме запускает Claude-парсинг и сохраняет профиль по client ID.
-                  </p>
                 </div>
                 <button
                   type="button"
@@ -1899,7 +1805,7 @@ export default function Home() {
                 >
                   <p className="text-sm font-medium text-slate-700">Перетащите резюме (PDF или текст)</p>
                   <p className="mt-1 text-xs text-slate-500">
-                    PDF отправляется в Claude как документ; текст — как plain text.
+                    Можно загрузить файл или вставить текст резюме.
                   </p>
                   <div className="mt-3 flex items-center gap-2">
                     <button
@@ -1950,7 +1856,7 @@ export default function Home() {
 
                 <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
                   <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-                    Распаршенный профиль клиента (Claude)
+                    Распаршенный профиль клиента
                   </p>
                   {activeResumeAnalysis ? (
                     <div className="mt-2 grid grid-cols-1 gap-2 text-xs text-slate-700 sm:grid-cols-2">
@@ -2002,7 +1908,7 @@ export default function Home() {
             <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-[0_8px_32px_-18px_rgba(15,23,42,0.3)]">
               <h3 className="text-lg font-semibold">Параметры поиска</h3>
               <p className="mt-1 text-sm text-slate-500">
-                Эти данные входят в контекст каждого запроса к Claude.
+                Эти данные используются для подбора вакансий и сигналов.
               </p>
               <div className="mt-4 space-y-4">
                 <div>
@@ -2130,7 +2036,7 @@ export default function Home() {
                     <button
                       type="button"
                       onClick={() => void runJobsEngine(false)}
-                      disabled={isJobsLoading || activeRun === "signals"}
+                      disabled={isJobsLoading}
                       className="inline-flex h-10 items-center justify-center rounded-xl bg-slate-900 px-4 text-sm font-medium text-white transition hover:bg-slate-800 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-slate-200 disabled:opacity-70"
                     >
                       {isJobsLoading ? "Загрузка..." : "Запустить"}
@@ -2138,7 +2044,7 @@ export default function Home() {
                     <button
                       type="button"
                       onClick={() => void runJobsEngine(true)}
-                      disabled={isJobsLoading || activeRun === "signals"}
+                      disabled={isJobsLoading}
                       className="inline-flex h-10 items-center justify-center rounded-xl border border-slate-300 bg-white px-4 text-sm font-medium text-slate-700 transition hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-slate-200 disabled:opacity-70"
                     >
                       Обновить
@@ -2149,7 +2055,7 @@ export default function Home() {
                     <button
                       type="button"
                       onClick={() => void runSignalsEngine(false)}
-                      disabled={isSignalsLoading || activeRun === "jobs"}
+                      disabled={isSignalsLoading}
                       className="inline-flex h-10 items-center justify-center rounded-xl bg-slate-900 px-4 text-sm font-medium text-white transition hover:bg-slate-800 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-slate-200 disabled:opacity-70"
                     >
                       {isSignalsLoading ? "Загрузка..." : "Запустить сигналы"}
@@ -2157,7 +2063,7 @@ export default function Home() {
                     <button
                       type="button"
                       onClick={() => void runSignalsEngine(true)}
-                      disabled={isSignalsLoading || activeRun === "jobs"}
+                      disabled={isSignalsLoading}
                       className="inline-flex h-10 items-center justify-center rounded-xl border border-slate-300 bg-white px-4 text-sm font-medium text-slate-700 transition hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-slate-200 disabled:opacity-70"
                     >
                       Обновить
@@ -2178,7 +2084,7 @@ export default function Home() {
                   <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50 p-10 text-center">
                     <p className="text-sm font-medium text-slate-700">Пока нет вакансий для клиента</p>
                     <p className="mt-1 text-sm text-slate-500">
-                      Нажмите «Запустить», чтобы собрать минимум 25 вакансий через Claude web search.
+                      Нажмите «Запустить», чтобы собрать актуальные вакансии.
                     </p>
                   </div>
                 ) : (
