@@ -529,6 +529,25 @@ function detectSeniorityBand(value: string): Exclude<CandidateLevel, "auto"> {
   return "middle";
 }
 
+function hasFallbackRoleEvidence(title: string, evidence: string, role: string): boolean {
+  const roleTokens = tokenize(role).filter(
+    (token) =>
+      !["senior", "junior", "middle", "lead", "principal", "staff", "manager", "specialist"].includes(
+        token,
+      ),
+  );
+  if (!roleTokens.length) return true;
+  const corpus = normalize(`${title} ${evidence}`);
+  const hits = roleTokens.filter((token) => corpus.includes(token));
+  if (hits.length === 0) return false;
+  if (roleTokens.length >= 3 && hits.length < 2) return false;
+
+  // Guard against known domain collisions (e.g. mobility vs supply).
+  if (roleTokens.includes("mobility") && corpus.includes("supply")) return false;
+  if (roleTokens.includes("supply") && corpus.includes("mobility")) return false;
+  return true;
+}
+
 function normalizeResumeProfile(raw: unknown, fallbackLocation: string): ResumeProfile {
   const input = (raw || {}) as Record<string, unknown>;
   const toStringArray = (value: unknown, max = 10): string[] =>
@@ -1619,43 +1638,60 @@ export default function Home() {
   async function fetchJobsFromFallbackEngine(
     clientSnapshot: Client,
     previousStatuses: Map<string, OutreachStatus>,
+    profileSnapshot?: ResumeProfile | null,
   ): Promise<JobItem[]> {
-    const response = await fetch("/api/jobs", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        role: clientSnapshot.targetRole || "",
-        location: clientSnapshot.location || "",
-        resumeText: (clientSnapshot.resume || "").slice(0, 4000),
-        candidateBand: clientSnapshot.candidateLevel,
-        experienceYears: clientSnapshot.experienceYears || "",
+    const fallbackRole =
+      clientSnapshot.targetRole ||
+      profileSnapshot?.jobTitlesTarget[0] ||
+      profileSnapshot?.jobTitlesCurrent[0] ||
+      "";
+    const scenarios: Array<{ companySizes: CompanySize[]; daysWindow: number; location: string }> = [
+      {
         companySizes: clientSnapshot.preferredCompanySizes,
         daysWindow: 7,
-        limit: 40,
-      }),
-    });
-    if (!response.ok) {
-      throw new Error(`Fallback API returned ${response.status}`);
-    }
-    const payload = (await response.json()) as LegacyJobsPayload;
-    const sourceItems = Array.isArray(payload.jobs) && payload.jobs.length
-      ? payload.jobs
-      : [...(payload.exactMatches || []), ...(payload.adjacentMatches || [])];
+        location: clientSnapshot.location || "",
+      },
+      { companySizes: ["startup", "scaleup", "enterprise"], daysWindow: 7, location: clientSnapshot.location || "" },
+      { companySizes: ["startup", "scaleup", "enterprise"], daysWindow: 7, location: "" },
+      { companySizes: ["startup", "scaleup", "enterprise"], daysWindow: 14, location: "" },
+    ];
 
-    const deduped = unique(
-      sourceItems
-        .map((item) => (typeof item.applyUrl === "string" ? normalizeJobUrl(item.applyUrl) : ""))
-        .filter(Boolean),
-    ).map((url) => sourceItems.find((item) => normalizeJobUrl(item.applyUrl || "") === url)!);
+    const mergedByUrl = new Map<string, JobItem>();
+    for (const scenario of scenarios) {
+      const response = await fetch("/api/jobs", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          role: fallbackRole,
+          location: scenario.location,
+          resumeText: (clientSnapshot.resume || "").slice(0, 4000),
+          candidateBand: clientSnapshot.candidateLevel,
+          experienceYears: clientSnapshot.experienceYears || "",
+          companySizes: scenario.companySizes,
+          daysWindow: scenario.daysWindow,
+          limit: 80,
+        }),
+      });
+      if (!response.ok) continue;
+      const payload = (await response.json()) as LegacyJobsPayload;
+      const sourceItems = Array.isArray(payload.jobs) && payload.jobs.length
+        ? payload.jobs
+        : [...(payload.exactMatches || []), ...(payload.adjacentMatches || [])];
 
-    return deduped
-      .slice(0, 30)
-      .map((item, index) => {
+      for (const item of sourceItems) {
         const url = normalizeJobUrl(item.applyUrl || "");
+        if (!url.startsWith("http")) continue;
+        const title = (item.title || "Untitled role").trim();
+        const evidence = item.fitReason || "Вакансия получена из fallback-движка RoleRadar.";
         const score = typeof item.matchScore === "number" ? clamp(item.matchScore, 0, 100) : 62;
-        return {
-          id: makeStableId([item.id || url || String(index), "fallback"]),
-          title: item.title || "Untitled role",
+        if (fallbackRole && !hasFallbackRoleEvidence(title, evidence, fallbackRole)) continue;
+        if (fallbackRole && score < 52) continue;
+
+        const existing = mergedByUrl.get(url);
+        if (existing && existing.fitScore >= score) continue;
+        mergedByUrl.set(url, {
+          id: makeStableId([item.id || url, "fallback"]),
+          title,
           company: item.company || "Unknown company",
           location: item.location || "United States",
           url,
@@ -1663,16 +1699,20 @@ export default function Home() {
           sourceVariant: "Fallback US job boards",
           companySize: "unknown",
           hiringContactRole: item.linkedinTargetRole || "Talent Acquisition Manager",
-          evidence: item.fitReason || "Вакансия получена из fallback-движка RoleRadar.",
+          evidence,
           outreachMessage:
             item.outreachTip ||
             "Hi, I saw this role and believe my profile is a strong fit. I would love to connect and share relevant experience.",
           fitScore: score,
           fitReason: item.fitReason || "Matched by fallback engine (US job boards).",
           status: previousStatuses.get(url) || "Найдено",
-        } satisfies JobItem;
-      })
-      .filter((item) => item.url.startsWith("http"));
+        });
+      }
+
+      if (mergedByUrl.size >= 25) break;
+    }
+
+    return [...mergedByUrl.values()].sort((a, b) => b.fitScore - a.fitScore).slice(0, 30);
   }
 
   function buildSignalsFallbackFromJobs(
@@ -1770,11 +1810,13 @@ export default function Home() {
     if (!activeClient) return;
     setJobsError("");
     setIsJobsLoading(true);
+    let profileSnapshot: ResumeProfile | null = null;
     try {
       const cached = jobsCacheByClient[activeClient.id];
       if (!forceRefresh && cached && isCacheFresh(cached.timestamp)) return;
 
       const profile = await ensureResumeAnalysis(activeClient, false);
+      profileSnapshot = profile;
       const variants = [
         {
           label: "По title",
@@ -1869,7 +1911,7 @@ export default function Home() {
     } catch (error) {
       const previousStatuses = new Map(activeJobs.map((job) => [normalizeJobUrl(job.url), job.status]));
       try {
-        const fallbackJobs = await fetchJobsFromFallbackEngine(activeClient, previousStatuses);
+        const fallbackJobs = await fetchJobsFromFallbackEngine(activeClient, previousStatuses, profileSnapshot);
         if (fallbackJobs.length > 0) {
           await persistJobsForClient(activeClient.id, fallbackJobs);
           setJobsError("Claude временно недоступен, показаны результаты из fallback job engine.");

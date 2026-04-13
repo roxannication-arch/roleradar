@@ -856,6 +856,12 @@ async function handleJobsRequest(inputRaw: JobsRequestInput) {
     const byRoleAdjacent = role
       ? byCompanySize.filter((job) => roleAdjacentMatch(job.title, role))
       : byCompanySize;
+    const byRoleAdjacentSameBand = byRoleAdjacent.filter((job) => {
+      const band = seniorityFromTitle(job.title);
+      if (candidateBand === "junior") return band === "junior" || band === "middle";
+      if (candidateBand === "middle") return band === "middle";
+      return true;
+    });
     const strictRoleRequested = Boolean(roleIntentTokens(role).length);
     const byBand = byRole.filter((job) => {
       const band = seniorityFromTitle(job.title);
@@ -867,6 +873,8 @@ async function handleJobsRequest(inputRaw: JobsRequestInput) {
     const pool = strictRoleRequested
       ? byBand.length
         ? byBand
+        : byRoleAdjacentSameBand.length
+          ? byRoleAdjacentSameBand
         : byRoleAdjacent.length
           ? byRoleAdjacent
           : byRole.length
@@ -925,6 +933,8 @@ async function handleJobsRequest(inputRaw: JobsRequestInput) {
     let poolUsed = strictRoleRequested
       ? byBand.length
         ? "strict-role+band"
+        : byRoleAdjacentSameBand.length
+          ? "strict-role-adjacent+band"
         : byRoleAdjacent.length
           ? "strict-role-adjacent"
           : byRole.length
