@@ -465,6 +465,19 @@ async function parseClaudeJsonWithRepair<T>(payload: unknown, schemaHint: string
   }
 }
 
+function shouldUseCachedResumeOnClaudeFailure(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  const text = error.message.toLowerCase();
+  return (
+    text.includes("529") ||
+    text.includes("overloaded") ||
+    text.includes("rate limit") ||
+    text.includes("429") ||
+    text.includes("504") ||
+    text.includes("timed out")
+  );
+}
+
 async function runInBatchesSettled<TInput, TOutput>(
   items: TInput[],
   batchSize: number,
@@ -1428,6 +1441,9 @@ export default function Home() {
     }
 
     if (!clientSnapshot.resume.trim()) {
+      if (cached?.profile) {
+        return cached.profile;
+      }
       throw new Error("Для анализа резюме нужен текст или PDF файл.");
     }
 
@@ -1500,6 +1516,11 @@ export default function Home() {
         },
       }));
       return profile;
+    } catch (error) {
+      if (cached?.profile && shouldUseCachedResumeOnClaudeFailure(error)) {
+        return cached.profile;
+      }
+      throw error;
     } finally {
       setIsResumeAnalyzing(false);
     }

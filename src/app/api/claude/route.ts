@@ -4,8 +4,13 @@ const ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_MODEL = "claude-sonnet-4-20250514";
 const ANTHROPIC_VERSION = "2023-06-01";
 const DEFAULT_MAX_TOKENS = 1000;
-const MAX_RETRIES = 0;
+const MAX_RETRIES = 2;
 const UPSTREAM_TIMEOUT_MS = 20000;
+const RETRYABLE_STATUSES = new Set([429, 500, 502, 503, 504, 529]);
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 type ClaudeProxyRequest = {
   messages?: unknown;
@@ -76,10 +81,12 @@ export async function POST(request: NextRequest) {
       clearTimeout(timeout);
     }
 
-    if (upstreamResponse.status !== 429 || attempt === MAX_RETRIES) {
+    const shouldRetry =
+      upstreamResponse && RETRYABLE_STATUSES.has(upstreamResponse.status) && attempt < MAX_RETRIES;
+    if (!shouldRetry) {
       break;
     }
-    // Currently retries are disabled (MAX_RETRIES = 0).
+    await sleep(400 * (attempt + 1));
   }
 
   if (!upstreamResponse) {
@@ -113,6 +120,17 @@ export async function POST(request: NextRequest) {
           upstream: responseJson,
         },
         { status: 429 },
+      );
+    }
+    if (upstreamResponse.status === 529) {
+      return NextResponse.json(
+        {
+          message:
+            "Claude сейчас перегружен (overloaded). Попробуйте снова через 20–40 секунд.",
+          upstreamStatus: upstreamResponse.status,
+          upstream: responseJson,
+        },
+        { status: 503 },
       );
     }
     return NextResponse.json(
