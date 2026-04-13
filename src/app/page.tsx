@@ -1,6 +1,18 @@
 "use client";
 
-import { ChangeEvent, ClipboardEvent, DragEvent, useEffect, useMemo, useRef, useState } from "react";
+import { ChangeEvent, ClipboardEvent, DragEvent, FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { type User } from "@supabase/supabase-js";
+
+import type { UserRole } from "@/lib/db-types";
+import {
+  getSupabaseBrowserClient,
+  type ClientRow,
+  type Database,
+  type JobRow,
+  type ProfileRow,
+  type ResumeAnalysisRow,
+  type SignalRow,
+} from "@/lib/supabase";
 
 type CandidateLevel = "auto" | "junior" | "middle" | "senior";
 type CompanySize = "startup" | "scaleup" | "enterprise";
@@ -11,6 +23,7 @@ type SignalPriority = "hot" | "warm" | "cold";
 
 type Client = {
   id: string;
+  consultantId: string;
   name: string;
   resume: string;
   resumeFileName?: string;
@@ -79,6 +92,13 @@ type SignalsCacheEntry = {
   timestamp: number;
 };
 
+type ConsultantOption = {
+  id: string;
+  email: string;
+  role: UserRole;
+  fullName: string | null;
+};
+
 type ClaudeResponseContentBlock = {
   type?: string;
   text?: string;
@@ -139,40 +159,12 @@ const WEB_SEARCH_TOOL = {
 };
 
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
-const CLIENTS_STORAGE_KEY = "roleradar.clients.v2";
-const ACTIVE_CLIENT_STORAGE_KEY = "roleradar.active-client-id.v2";
-const RESUME_ANALYSIS_STORAGE_KEY = "roleradar.resume-analysis.v1";
-const JOBS_CACHE_STORAGE_KEY = "roleradar.jobs-cache.v1";
-const SIGNALS_CACHE_STORAGE_KEY = "roleradar.signals-cache.v1";
+const CLAUDE_PROXY_TIMEOUT_MS = 35000;
 
-const INITIAL_CLIENTS: Client[] = [
-  {
-    id: "c1",
-    name: "Анна Кузнецова",
-    resume:
-      "8 лет в продукте: growth, analytics, launch B2C features, cross-functional collaboration.",
-    resumeFileName: "anna-kuznetsova-cv.pdf",
-    targetRole: "Senior Product Manager",
-    location: "Miami, FL",
-    experienceYears: "8",
-    candidateLevel: "auto",
-    preferredCompanySizes: ["startup", "scaleup"],
-    lastAnalyzedAt: "2026-04-08",
-  },
-  {
-    id: "c2",
-    name: "Илья Петров",
-    resume:
-      "Backend инженер, Python/Go, микросервисы, high-load, DevOps и процессы CI/CD.",
-    resumeFileName: "ilya-petrov-resume.docx",
-    targetRole: "Senior Backend Engineer",
-    location: "Austin, TX",
-    experienceYears: "6",
-    candidateLevel: "auto",
-    preferredCompanySizes: ["startup", "scaleup", "enterprise"],
-    lastAnalyzedAt: "2026-04-07",
-  },
-];
+const LEGACY_CLIENTS_STORAGE_KEY = "roleradar.clients.v2";
+const LEGACY_RESUME_ANALYSIS_STORAGE_KEY = "roleradar.resume-analysis.v1";
+const LEGACY_JOBS_CACHE_STORAGE_KEY = "roleradar.jobs-cache.v1";
+const LEGACY_SIGNALS_CACHE_STORAGE_KEY = "roleradar.signals-cache.v1";
 
 function normalize(value: string): string {
   return value.toLowerCase().trim();
@@ -258,81 +250,11 @@ function parseSignalPriority(value: unknown): SignalPriority {
   return "warm";
 }
 
-
 function parseSignalTrigger(value: unknown): SignalTrigger {
   if (value === "funding" || value === "expansion" || value === "key_hire" || value === "contract") {
     return value;
   }
   return "contract";
-}
-
-function normalizeClient(raw: unknown, index: number): Client | null {
-  if (!raw || typeof raw !== "object") return null;
-  const client = raw as Partial<Client>;
-  if (!client.id || !client.name) return null;
-  return {
-    id: String(client.id || `c-restored-${index}`),
-    name: String(client.name || `Клиент ${index + 1}`),
-    resume: String(client.resume || ""),
-    resumeFileName: client.resumeFileName ? String(client.resumeFileName) : undefined,
-    resumeFileSignature: client.resumeFileSignature ? String(client.resumeFileSignature) : undefined,
-    targetRole: String(client.targetRole || ""),
-    location: String(client.location || ""),
-    experienceYears: String(client.experienceYears || "3"),
-    candidateLevel: parseCandidateLevel(client.candidateLevel),
-    preferredCompanySizes: parseCompanySizes(client.preferredCompanySizes),
-    lastAnalyzedAt: client.lastAnalyzedAt ? String(client.lastAnalyzedAt) : undefined,
-  };
-}
-
-function loadClientsFromStorage(): Client[] {
-  if (typeof window === "undefined") return INITIAL_CLIENTS;
-  try {
-    const raw = window.localStorage.getItem(CLIENTS_STORAGE_KEY);
-    if (!raw) return INITIAL_CLIENTS;
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return INITIAL_CLIENTS;
-    const restored = parsed
-      .map((item, index) => normalizeClient(item, index))
-      .filter((item): item is Client => item !== null);
-    return restored.length ? restored : INITIAL_CLIENTS;
-  } catch {
-    return INITIAL_CLIENTS;
-  }
-}
-
-function loadActiveClientIdFromStorage(clients: Client[]): string {
-  if (typeof window === "undefined") return clients[0]?.id || "";
-  try {
-    const stored = window.localStorage.getItem(ACTIVE_CLIENT_STORAGE_KEY);
-    if (stored && clients.some((client) => client.id === stored)) return stored;
-  } catch {
-    // ignore
-  }
-  return clients[0]?.id || "";
-}
-
-function loadMapFromStorage<T>(key: string): Record<string, T> {
-  if (typeof window === "undefined") return {};
-  try {
-    const raw = window.localStorage.getItem(key);
-    if (!raw) return {};
-    const parsed = JSON.parse(raw);
-    if (!parsed || typeof parsed !== "object") return {};
-    return parsed as Record<string, T>;
-  } catch {
-    return {};
-  }
-}
-
-function safeSetLocalStorage(key: string, value: unknown) {
-  if (typeof window === "undefined") return;
-  try {
-    const serialized = typeof value === "string" ? value : JSON.stringify(value);
-    window.localStorage.setItem(key, serialized);
-  } catch {
-    // localStorage can fail (e.g. quota exceeded); keep UI functional.
-  }
 }
 
 function normalizeJobUrl(url: string): string {
@@ -366,6 +288,12 @@ function arrayBufferToBase64(buffer: ArrayBuffer): string {
     binary += String.fromCharCode(...chunk);
   }
   return btoa(binary);
+}
+
+function timestampFromIso(value: string | null | undefined): number {
+  if (!value) return Date.now();
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : Date.now();
 }
 
 function extractClaudeText(payload: unknown): string {
@@ -458,7 +386,7 @@ function tryParseJsonCandidate<T>(text: string): T | null {
     try {
       return JSON.parse(normalized) as T;
     } catch {
-      // Try next candidate.
+      // keep iterating
     }
   }
   return null;
@@ -466,14 +394,49 @@ function tryParseJsonCandidate<T>(text: string): T | null {
 
 function parseClaudeJson<T>(payload: unknown): T {
   const text = extractClaudeText(payload);
-  if (!text) {
-    throw new Error("Claude вернул пустой ответ.");
-  }
+  if (!text) throw new Error("Claude вернул пустой ответ.");
   const parsed = tryParseJsonCandidate<T>(text);
-  if (!parsed) {
-    throw new Error("Не удалось извлечь JSON из ответа Claude.");
-  }
+  if (!parsed) throw new Error("Не удалось извлечь JSON из ответа Claude.");
   return parsed;
+}
+
+function humanizeClaudeError(error: unknown): string {
+  if (!(error instanceof Error)) return "Не удалось выполнить запрос к Claude.";
+  if (error.message.toLowerCase().includes("rate limit") || error.message.includes("429")) {
+    return "Claude временно ограничил запросы. Подождите 30–60 секунд и запустите снова.";
+  }
+  return error.message;
+}
+
+async function callClaudeProxy(body: { messages: unknown[]; tools?: unknown[]; system?: string }) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), CLAUDE_PROXY_TIMEOUT_MS);
+  let response: Response;
+  try {
+    response = await fetch("/api/claude", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+  } catch (error) {
+    clearTimeout(timeout);
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw new Error("Запрос к Claude превысил лимит ожидания. Нажмите «Обновить».");
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+  const payload = await response.json().catch(() => null);
+  if (!response.ok) {
+    const details =
+      payload && typeof payload === "object" && "message" in payload
+        ? String((payload as { message: unknown }).message)
+        : `status ${response.status}`;
+    throw new Error(`Ошибка /api/claude: ${details}`);
+  }
+  return payload;
 }
 
 async function parseClaudeJsonWithRepair<T>(payload: unknown, schemaHint: string): Promise<T> {
@@ -482,7 +445,6 @@ async function parseClaudeJsonWithRepair<T>(payload: unknown, schemaHint: string
   } catch {
     const rawText = extractClaudeText(payload);
     if (!rawText) throw new Error("Claude вернул пустой ответ.");
-
     const repairPrompt = [
       "Convert the following content into STRICT valid JSON only.",
       "Do not add explanations, markdown, or comments.",
@@ -491,24 +453,11 @@ async function parseClaudeJsonWithRepair<T>(payload: unknown, schemaHint: string
       "Content to convert:",
       rawText.slice(0, 6000),
     ].join("\n");
-
     const repairPayload = await callClaudeProxy({
       messages: [{ role: "user", content: [{ type: "text", text: repairPrompt }] }],
     });
-
-    const repaired = parseClaudeJson<T>(repairPayload);
-    return repaired;
+    return parseClaudeJson<T>(repairPayload);
   }
-}
-
-function humanizeClaudeError(error: unknown): string {
-  if (!(error instanceof Error)) {
-    return "Не удалось выполнить запрос к Claude.";
-  }
-  if (error.message.toLowerCase().includes("rate limit") || error.message.includes("429")) {
-    return "Claude временно ограничил запросы. Подождите 30–60 секунд и нажмите «Запустить» снова.";
-  }
-  return error.message;
 }
 
 async function runInBatchesSettled<TInput, TOutput>(
@@ -528,9 +477,7 @@ async function runInBatchesSettled<TInput, TOutput>(
         failed += 1;
       }
     }
-    if (i + batchSize < items.length) {
-      await sleep(1200);
-    }
+    if (i + batchSize < items.length) await sleep(1200);
   }
   return { fulfilled, failed };
 }
@@ -586,6 +533,7 @@ function normalizeResumeProfile(raw: unknown, fallbackLocation: string): ResumeP
           .filter(Boolean)
           .slice(0, max)
       : [];
+
   const yearsCandidate =
     typeof input.total_years_experience === "number"
       ? input.total_years_experience
@@ -623,56 +571,285 @@ function normalizeResumeProfile(raw: unknown, fallbackLocation: string): ResumeP
   };
 }
 
-const CLAUDE_PROXY_TIMEOUT_MS = 35000;
+function mapClientRow(row: ClientRow): Client {
+  return {
+    id: row.id,
+    consultantId: row.consultant_id,
+    name: row.name,
+    resume: row.resume,
+    resumeFileName: row.resume_file_name ?? undefined,
+    resumeFileSignature: row.resume_file_signature ?? undefined,
+    targetRole: row.target_role,
+    location: row.location,
+    experienceYears: row.experience_years,
+    candidateLevel: parseCandidateLevel(row.candidate_level),
+    preferredCompanySizes: parseCompanySizes(row.preferred_company_sizes),
+    lastAnalyzedAt: row.last_analyzed_at ?? undefined,
+  };
+}
 
-async function callClaudeProxy(body: { messages: unknown[]; tools?: unknown[]; system?: string }) {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), CLAUDE_PROXY_TIMEOUT_MS);
-  let response: Response;
+type ClientRowUpdate = Database["public"]["Tables"]["clients"]["Update"];
+
+function mapClientPatchToRow(patch: Partial<Client>): ClientRowUpdate {
+  const mapped: ClientRowUpdate = {};
+  if (patch.name !== undefined) mapped.name = patch.name;
+  if (patch.resume !== undefined) mapped.resume = patch.resume;
+  if (patch.resumeFileName !== undefined) mapped.resume_file_name = patch.resumeFileName ?? null;
+  if (patch.resumeFileSignature !== undefined) mapped.resume_file_signature = patch.resumeFileSignature ?? null;
+  if (patch.targetRole !== undefined) mapped.target_role = patch.targetRole;
+  if (patch.location !== undefined) mapped.location = patch.location;
+  if (patch.experienceYears !== undefined) mapped.experience_years = patch.experienceYears;
+  if (patch.candidateLevel !== undefined) mapped.candidate_level = patch.candidateLevel;
+  if (patch.preferredCompanySizes !== undefined) {
+    mapped.preferred_company_sizes = patch.preferredCompanySizes;
+  }
+  if (patch.lastAnalyzedAt !== undefined) mapped.last_analyzed_at = patch.lastAnalyzedAt ?? null;
+  if (patch.consultantId !== undefined) mapped.consultant_id = patch.consultantId;
+  return mapped;
+}
+
+function mapJobRow(row: JobRow): JobItem {
+  return {
+    id: row.id,
+    title: row.title,
+    company: row.company,
+    location: row.location,
+    url: normalizeJobUrl(row.url),
+    postedAt: row.posted_at ?? undefined,
+    sourceVariant: row.source_variant,
+    companySize: parseCompanySize(row.company_size),
+    hiringContactRole: row.hiring_contact_role,
+    evidence: row.evidence,
+    outreachMessage: row.outreach_message,
+    fitScore: clamp(row.fit_score, 0, 100),
+    fitReason: row.fit_reason,
+    status: parseOutreachStatus(row.status),
+  };
+}
+
+function mapSignalRow(row: SignalRow): GrowthSignal {
+  return {
+    id: row.id,
+    company: row.company,
+    triggerType: parseSignalTrigger(row.trigger_type),
+    priority: parseSignalPriority(row.priority),
+    hiringManager: row.hiring_manager,
+    evidence: row.evidence,
+    sourceUrl: normalizeJobUrl(row.source_url),
+    outreachMessage: row.outreach_message,
+    status: parseOutreachStatus(row.status),
+  };
+}
+
+function buildJobsCacheByClient(rows: JobRow[]): Record<string, JobsCacheEntry> {
+  const grouped = new Map<string, JobRow[]>();
+  for (const row of rows) {
+    const list = grouped.get(row.client_id) ?? [];
+    list.push(row);
+    grouped.set(row.client_id, list);
+  }
+  const result: Record<string, JobsCacheEntry> = {};
+  for (const [clientId, list] of grouped.entries()) {
+    const timestamp = list.reduce(
+      (max, row) => Math.max(max, timestampFromIso(row.updated_at)),
+      0,
+    );
+    result[clientId] = {
+      items: list.map(mapJobRow).sort((a, b) => b.fitScore - a.fitScore),
+      timestamp: timestamp || Date.now(),
+    };
+  }
+  return result;
+}
+
+function buildSignalsCacheByClient(rows: SignalRow[]): Record<string, SignalsCacheEntry> {
+  const grouped = new Map<string, SignalRow[]>();
+  for (const row of rows) {
+    const list = grouped.get(row.client_id) ?? [];
+    list.push(row);
+    grouped.set(row.client_id, list);
+  }
+  const priorityRank: Record<SignalPriority, number> = { hot: 0, warm: 1, cold: 2 };
+  const result: Record<string, SignalsCacheEntry> = {};
+  for (const [clientId, list] of grouped.entries()) {
+    const timestamp = list.reduce(
+      (max, row) => Math.max(max, timestampFromIso(row.updated_at)),
+      0,
+    );
+    result[clientId] = {
+      items: list
+        .map(mapSignalRow)
+        .sort((a, b) => priorityRank[a.priority] - priorityRank[b.priority]),
+      timestamp: timestamp || Date.now(),
+    };
+  }
+  return result;
+}
+
+function buildResumeAnalysisByClient(rows: ResumeAnalysisRow[]): Record<string, ResumeAnalysisEntry> {
+  const result: Record<string, ResumeAnalysisEntry> = {};
+  for (const row of rows) {
+    result[row.client_id] = {
+      profile: row.profile,
+      timestamp: timestampFromIso(row.updated_at),
+      sourceFingerprint: row.source_fingerprint,
+    };
+  }
+  return result;
+}
+
+function readLegacyJson<T>(key: string): T | null {
+  if (typeof window === "undefined") return null;
   try {
-    response = await fetch("/api/claude", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-      signal: controller.signal,
-    });
-  } catch (error) {
-    clearTimeout(timeout);
-    if (error instanceof DOMException && error.name === "AbortError") {
-      throw new Error("Запрос к Claude превысил лимит ожидания. Нажмите «Обновить».");
+    const raw = window.localStorage.getItem(key);
+    if (!raw) return null;
+    return JSON.parse(raw) as T;
+  } catch {
+    return null;
+  }
+}
+
+function normalizeLegacyClient(raw: unknown, index: number): Client | null {
+  if (!raw || typeof raw !== "object") return null;
+  const client = raw as Partial<Client>;
+  if (!client.id || !client.name) return null;
+  return {
+    id: String(client.id || `legacy-${index}`),
+    consultantId: String(client.consultantId || ""),
+    name: String(client.name || `Клиент ${index + 1}`),
+    resume: String(client.resume || ""),
+    resumeFileName: client.resumeFileName ? String(client.resumeFileName) : undefined,
+    resumeFileSignature: client.resumeFileSignature ? String(client.resumeFileSignature) : undefined,
+    targetRole: String(client.targetRole || ""),
+    location: String(client.location || ""),
+    experienceYears: String(client.experienceYears || "3"),
+    candidateLevel: parseCandidateLevel(client.candidateLevel),
+    preferredCompanySizes: parseCompanySizes(client.preferredCompanySizes),
+    lastAnalyzedAt: client.lastAnalyzedAt ? String(client.lastAnalyzedAt) : undefined,
+  };
+}
+
+async function migrateLegacyLocalStorageData(
+  supabase: ReturnType<typeof getSupabaseBrowserClient>,
+  ownerUserId: string,
+): Promise<boolean> {
+  const legacyClientsRaw = readLegacyJson<unknown[]>(LEGACY_CLIENTS_STORAGE_KEY);
+  if (!legacyClientsRaw || !Array.isArray(legacyClientsRaw) || !legacyClientsRaw.length) return false;
+
+  const legacyResumeMap = readLegacyJson<Record<string, unknown>>(LEGACY_RESUME_ANALYSIS_STORAGE_KEY) || {};
+  const legacyJobsMap = readLegacyJson<Record<string, unknown>>(LEGACY_JOBS_CACHE_STORAGE_KEY) || {};
+  const legacySignalsMap = readLegacyJson<Record<string, unknown>>(LEGACY_SIGNALS_CACHE_STORAGE_KEY) || {};
+
+  const legacyClients = legacyClientsRaw
+    .map((item, index) => normalizeLegacyClient(item, index))
+    .filter((item): item is Client => item !== null);
+  if (!legacyClients.length) return false;
+
+  for (const legacyClient of legacyClients) {
+    const { data: insertedClient, error: insertClientError } = await supabase
+      .from("clients")
+      .insert({
+        consultant_id: ownerUserId,
+        name: legacyClient.name,
+        resume: legacyClient.resume,
+        resume_file_name: legacyClient.resumeFileName ?? null,
+        resume_file_signature: legacyClient.resumeFileSignature ?? null,
+        target_role: legacyClient.targetRole,
+        location: legacyClient.location,
+        experience_years: legacyClient.experienceYears,
+        candidate_level: legacyClient.candidateLevel,
+        preferred_company_sizes: legacyClient.preferredCompanySizes,
+        last_analyzed_at: legacyClient.lastAnalyzedAt ?? null,
+      })
+      .select("*")
+      .single();
+    if (insertClientError || !insertedClient) continue;
+
+    const legacyResumeEntry = legacyResumeMap[legacyClient.id] as
+      | { profile?: ResumeProfile; sourceFingerprint?: string }
+      | undefined;
+    if (legacyResumeEntry?.profile) {
+      await supabase.from("resume_analysis").upsert(
+        {
+          client_id: insertedClient.id,
+          profile: legacyResumeEntry.profile,
+          source_fingerprint: legacyResumeEntry.sourceFingerprint || `${legacyClient.id}-legacy`,
+        },
+        { onConflict: "client_id" },
+      );
     }
-    throw error;
-  } finally {
-    clearTimeout(timeout);
+
+    const legacyJobsEntry = legacyJobsMap[legacyClient.id] as { items?: JobItem[] } | undefined;
+    if (legacyJobsEntry?.items?.length) {
+      const rows: Database["public"]["Tables"]["jobs"]["Insert"][] = legacyJobsEntry.items.map((job) => ({
+        client_id: insertedClient.id,
+        title: job.title,
+        company: job.company,
+        location: job.location,
+        url: normalizeJobUrl(job.url),
+        posted_at: job.postedAt || null,
+        source_variant: job.sourceVariant,
+        company_size: job.companySize,
+        hiring_contact_role: job.hiringContactRole,
+        evidence: job.evidence,
+        outreach_message: job.outreachMessage,
+        fit_score: clamp(job.fitScore, 0, 100),
+        fit_reason: job.fitReason,
+        status: parseOutreachStatus(job.status),
+      }));
+      await supabase.from("jobs").insert(rows);
+    }
+
+    const legacySignalsEntry = legacySignalsMap[legacyClient.id] as { items?: GrowthSignal[] } | undefined;
+    if (legacySignalsEntry?.items?.length) {
+      const rows: Database["public"]["Tables"]["signals"]["Insert"][] = legacySignalsEntry.items.map(
+        (signal) => ({
+          client_id: insertedClient.id,
+          company: signal.company,
+          trigger_type: parseSignalTrigger(signal.triggerType),
+          priority: parseSignalPriority(signal.priority),
+          hiring_manager: signal.hiringManager,
+          evidence: signal.evidence,
+          source_url: normalizeJobUrl(signal.sourceUrl),
+          outreach_message: signal.outreachMessage,
+          status: parseOutreachStatus(signal.status),
+        }),
+      );
+      await supabase.from("signals").insert(rows);
+    }
   }
-  const payload = await response.json().catch(() => null);
-  if (!response.ok) {
-    const details =
-      payload && typeof payload === "object" && "message" in payload
-        ? String((payload as { message: unknown }).message)
-        : `status ${response.status}`;
-    const upstreamStatus =
-      payload && typeof payload === "object" && "upstreamStatus" in payload
-        ? Number((payload as { upstreamStatus?: unknown }).upstreamStatus)
-        : response.status;
-    const error = new Error(`Ошибка /api/claude: ${details}`);
-    (error as Error & { status?: number }).status = Number.isFinite(upstreamStatus)
-      ? upstreamStatus
-      : response.status;
-    throw error;
-  }
-  return payload;
+
+  return true;
 }
 
 export default function Home() {
-  const [clients, setClients] = useState<Client[]>(() => loadClientsFromStorage());
-  const [activeClientId, setActiveClientId] = useState<string>(() =>
-    loadActiveClientIdFromStorage(loadClientsFromStorage()),
-  );
+  const [supabase, setSupabase] = useState<ReturnType<typeof getSupabaseBrowserClient> | null>(null);
+  const [supabaseError, setSupabaseError] = useState<string>("");
+
+  const [isAuthLoading, setIsAuthLoading] = useState(true);
+  const [appLoading, setAppLoading] = useState(false);
+  const [appError, setAppError] = useState("");
+
+  const [user, setUser] = useState<User | null>(null);
+  const [userRole, setUserRole] = useState<UserRole | null>(null);
+  const [consultants, setConsultants] = useState<ConsultantOption[]>([]);
+
+  const [authMode, setAuthMode] = useState<"signin" | "signup">("signin");
+  const [authEmail, setAuthEmail] = useState("");
+  const [authPassword, setAuthPassword] = useState("");
+  const [authError, setAuthError] = useState("");
+  const [authInfo, setAuthInfo] = useState("");
+  const [isAuthActionLoading, setIsAuthActionLoading] = useState(false);
+
+  const [clients, setClients] = useState<Client[]>([]);
+  const [activeClientId, setActiveClientId] = useState<string>("");
   const [newClientName, setNewClientName] = useState<string>("");
+  const [newClientConsultantId, setNewClientConsultantId] = useState<string>("");
+
   const [generatedReport, setGeneratedReport] = useState<string>("");
   const [isReportOpen, setIsReportOpen] = useState(false);
   const [dragActive, setDragActive] = useState(false);
+
   const [resumeInputError, setResumeInputError] = useState<string>("");
   const [jobsError, setJobsError] = useState<string>("");
   const [signalsError, setSignalsError] = useState<string>("");
@@ -680,16 +857,183 @@ export default function Home() {
   const [isJobsLoading, setIsJobsLoading] = useState(false);
   const [isSignalsLoading, setIsSignalsLoading] = useState(false);
   const [workspaceTab, setWorkspaceTab] = useState<WorkspaceTab>("jobs");
-  const [resumeAnalysisByClient, setResumeAnalysisByClient] = useState<
-    Record<string, ResumeAnalysisEntry>
-  >(() => loadMapFromStorage<ResumeAnalysisEntry>(RESUME_ANALYSIS_STORAGE_KEY));
-  const [jobsCacheByClient, setJobsCacheByClient] = useState<Record<string, JobsCacheEntry>>(() =>
-    loadMapFromStorage<JobsCacheEntry>(JOBS_CACHE_STORAGE_KEY),
-  );
-  const [signalsCacheByClient, setSignalsCacheByClient] = useState<Record<string, SignalsCacheEntry>>(
-    () => loadMapFromStorage<SignalsCacheEntry>(SIGNALS_CACHE_STORAGE_KEY),
-  );
+
+  const [resumeAnalysisByClient, setResumeAnalysisByClient] = useState<Record<string, ResumeAnalysisEntry>>({});
+  const [jobsCacheByClient, setJobsCacheByClient] = useState<Record<string, JobsCacheEntry>>({});
+  const [signalsCacheByClient, setSignalsCacheByClient] = useState<Record<string, SignalsCacheEntry>>({});
+
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    try {
+      const client = getSupabaseBrowserClient();
+      setSupabase(client);
+      void (async () => {
+        const {
+          data: { session },
+          error,
+        } = await client.auth.getSession();
+        if (error) {
+          setSupabaseError(error.message);
+        } else {
+          setUser(session?.user ?? null);
+        }
+        setIsAuthLoading(false);
+      })();
+      const { data: listener } = client.auth.onAuthStateChange((_event, session) => {
+        setUser(session?.user ?? null);
+        if (!session?.user) {
+          setUserRole(null);
+          setClients([]);
+          setConsultants([]);
+          setResumeAnalysisByClient({});
+          setJobsCacheByClient({});
+          setSignalsCacheByClient({});
+          setActiveClientId("");
+          setGeneratedReport("");
+          setIsReportOpen(false);
+        }
+      });
+      return () => {
+        listener.subscription.unsubscribe();
+      };
+    } catch (error) {
+      setSupabaseError(error instanceof Error ? error.message : "Не удалось инициализировать Supabase.");
+      setIsAuthLoading(false);
+    }
+  }, []);
+
+  async function ensureProfile(currentUser: User): Promise<ProfileRow> {
+    if (!supabase) throw new Error("Supabase не инициализирован.");
+    const { data: existing, error: existingError } = await supabase
+      .from("profiles")
+      .select("*")
+      .eq("id", currentUser.id)
+      .maybeSingle();
+    if (existingError) throw existingError;
+    if (existing) return existing;
+
+    const payload: Database["public"]["Tables"]["profiles"]["Insert"] = {
+      id: currentUser.id,
+      email: currentUser.email ?? null,
+      role: "consultant",
+      full_name:
+        typeof currentUser.user_metadata?.full_name === "string"
+          ? currentUser.user_metadata.full_name
+          : null,
+    };
+    const { data: inserted, error: insertError } = await supabase
+      .from("profiles")
+      .insert(payload)
+      .select("*")
+      .single();
+    if (insertError || !inserted) throw insertError ?? new Error("Не удалось создать профиль пользователя.");
+    return inserted;
+  }
+
+  async function loadAllDataForUser(currentUser: User) {
+    if (!supabase) return;
+    setAppLoading(true);
+    setAppError("");
+    try {
+      const profile = await ensureProfile(currentUser);
+      setUserRole(profile.role);
+
+      let consultantRows: ProfileRow[] = [];
+      if (profile.role === "admin") {
+        const { data: rows, error } = await supabase
+          .from("profiles")
+          .select("*")
+          .order("email", { ascending: true });
+        if (error) throw error;
+        consultantRows = rows || [];
+      } else {
+        consultantRows = [profile];
+      }
+
+      const consultantOptions: ConsultantOption[] = consultantRows.map((row) => ({
+        id: row.id,
+        email: row.email || "без email",
+        role: row.role,
+        fullName: row.full_name,
+      }));
+      setConsultants(consultantOptions);
+      if (!newClientConsultantId) {
+        if (profile.role === "admin") {
+          const firstConsultant = consultantOptions.find((item) => item.role === "consultant");
+          setNewClientConsultantId(firstConsultant?.id || currentUser.id);
+        } else {
+          setNewClientConsultantId(currentUser.id);
+        }
+      }
+
+      let clientQuery = supabase.from("clients").select("*").order("created_at", { ascending: false });
+      if (profile.role !== "admin") {
+        clientQuery = clientQuery.eq("consultant_id", currentUser.id);
+      }
+      const { data: clientRowsInitial, error: clientsInitialError } = await clientQuery;
+      if (clientsInitialError) throw clientsInitialError;
+      let clientRows = clientRowsInitial || [];
+
+      if (clientRows.length === 0) {
+        const migrated = await migrateLegacyLocalStorageData(supabase, currentUser.id);
+        if (migrated) {
+          let refetchQuery = supabase.from("clients").select("*").order("created_at", { ascending: false });
+          if (profile.role !== "admin") {
+            refetchQuery = refetchQuery.eq("consultant_id", currentUser.id);
+          }
+          const { data: afterMigrateRows, error: afterMigrateError } = await refetchQuery;
+          if (afterMigrateError) throw afterMigrateError;
+          clientRows = afterMigrateRows || [];
+        }
+      }
+
+      const mappedClients = clientRows.map(mapClientRow);
+      setClients(mappedClients);
+      setActiveClientId((prev) =>
+        prev && mappedClients.some((client) => client.id === prev) ? prev : mappedClients[0]?.id || "",
+      );
+
+      if (!clientRows.length) {
+        setResumeAnalysisByClient({});
+        setJobsCacheByClient({});
+        setSignalsCacheByClient({});
+        return;
+      }
+
+      const clientIds = clientRows.map((client) => client.id);
+
+      const [resumeResp, jobsResp, signalsResp] = await Promise.all([
+        supabase.from("resume_analysis").select("*").in("client_id", clientIds),
+        supabase.from("jobs").select("*").in("client_id", clientIds),
+        supabase.from("signals").select("*").in("client_id", clientIds),
+      ]);
+
+      if (resumeResp.error) throw resumeResp.error;
+      if (jobsResp.error) throw jobsResp.error;
+      if (signalsResp.error) throw signalsResp.error;
+
+      setResumeAnalysisByClient(buildResumeAnalysisByClient(resumeResp.data || []));
+      setJobsCacheByClient(buildJobsCacheByClient(jobsResp.data || []));
+      setSignalsCacheByClient(buildSignalsCacheByClient(signalsResp.data || []));
+    } catch (error) {
+      setAppError(error instanceof Error ? error.message : "Не удалось загрузить данные пользователя.");
+    } finally {
+      setAppLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    if (!supabase || !user) return;
+    void loadAllDataForUser(user);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [supabase, user]);
+
+  const consultantById = useMemo(() => {
+    const map = new Map<string, ConsultantOption>();
+    for (const consultant of consultants) map.set(consultant.id, consultant);
+    return map;
+  }, [consultants]);
 
   const activeClient = useMemo(
     () => clients.find((client) => client.id === activeClientId),
@@ -701,34 +1045,6 @@ export default function Home() {
   const activeSignalsCache = activeClient ? signalsCacheByClient[activeClient.id] : undefined;
   const activeJobs = useMemo(() => activeJobsCache?.items ?? [], [activeJobsCache]);
   const activeSignals = useMemo(() => activeSignalsCache?.items ?? [], [activeSignalsCache]);
-
-  useEffect(() => {
-    if (!clients.length) return;
-    if (!clients.some((client) => client.id === activeClientId)) {
-      setActiveClientId(clients[0].id);
-    }
-  }, [clients, activeClientId]);
-
-  useEffect(() => {
-    safeSetLocalStorage(CLIENTS_STORAGE_KEY, clients);
-  }, [clients]);
-
-  useEffect(() => {
-    if (!activeClientId) return;
-    safeSetLocalStorage(ACTIVE_CLIENT_STORAGE_KEY, activeClientId);
-  }, [activeClientId]);
-
-  useEffect(() => {
-    safeSetLocalStorage(RESUME_ANALYSIS_STORAGE_KEY, resumeAnalysisByClient);
-  }, [resumeAnalysisByClient]);
-
-  useEffect(() => {
-    safeSetLocalStorage(JOBS_CACHE_STORAGE_KEY, jobsCacheByClient);
-  }, [jobsCacheByClient]);
-
-  useEffect(() => {
-    safeSetLocalStorage(SIGNALS_CACHE_STORAGE_KEY, signalsCacheByClient);
-  }, [signalsCacheByClient]);
 
   const pipelineSummary = useMemo(() => {
     const jobsFound = activeJobs.length;
@@ -758,51 +1074,91 @@ export default function Home() {
     };
   }, [activeJobs, activeSignals]);
 
-  function updateActiveClient(patch: Partial<Client>) {
-    setClients((prev) =>
-      prev.map((client) => (client.id === activeClientId ? { ...client, ...patch } : client)),
-    );
+  const metrics = [
+    { label: "Найдено вакансий", value: pipelineSummary.jobsFound, hint: "по текущему поиску" },
+    { label: "High-fit вакансий", value: pipelineSummary.highMatches, hint: "fit score 80+" },
+    { label: "Сигналы роста", value: pipelineSummary.signalsFound, hint: "компании с признаками найма" },
+    { label: "Найдено контактов", value: pipelineSummary.contactsFound, hint: "по вакансиям и сигналам" },
+    { label: "Outreach отправлено", value: pipelineSummary.outreachSent, hint: "по статусам" },
+    { label: "Ответов получено", value: pipelineSummary.responses, hint: "по статусам" },
+    { label: "Конверсия", value: `${pipelineSummary.conversion}%`, hint: "ответы / outreach" },
+  ];
+
+  function persistClientPatch(clientId: string, patch: Partial<Client>) {
+    if (!supabase) return;
+    const rowPatch = mapClientPatchToRow(patch);
+    if (!Object.keys(rowPatch).length) return;
+    void supabase.from("clients").update(rowPatch).eq("id", clientId);
   }
 
-  function addClient() {
+  function updateActiveClient(patch: Partial<Client>) {
+    if (!activeClient) return;
+    setClients((prev) =>
+      prev.map((client) => (client.id === activeClient.id ? { ...client, ...patch } : client)),
+    );
+    persistClientPatch(activeClient.id, patch);
+  }
+
+  async function addClient() {
+    if (!supabase || !user) return;
     const trimmedName = newClientName.trim();
     if (!trimmedName) return;
-    const client: Client = {
-      id: `c-${Date.now()}`,
+    const consultantId =
+      userRole === "admin" ? newClientConsultantId || user.id : user.id;
+    const payload: Database["public"]["Tables"]["clients"]["Insert"] = {
+      consultant_id: consultantId,
       name: trimmedName,
       resume: "",
-      targetRole: "",
+      resume_file_name: null,
+      resume_file_signature: null,
+      target_role: "",
       location: "",
-      candidateLevel: "auto",
-      experienceYears: "3",
-      preferredCompanySizes: ["startup", "scaleup", "enterprise"],
+      experience_years: "3",
+      candidate_level: "auto",
+      preferred_company_sizes: ["startup", "scaleup", "enterprise"],
+      last_analyzed_at: null,
     };
-    setClients((prev) => [client, ...prev]);
-    setActiveClientId(client.id);
+    const { data, error } = await supabase.from("clients").insert(payload).select("*").single();
+    if (error || !data) {
+      setAppError(error?.message || "Не удалось добавить клиента.");
+      return;
+    }
+    const mapped = mapClientRow(data);
+    setClients((prev) => [mapped, ...prev]);
+    setActiveClientId(mapped.id);
     setWorkspaceTab("jobs");
     setNewClientName("");
     setGeneratedReport("");
     setIsReportOpen(false);
   }
 
-  function renameClient(clientId: string) {
+  async function renameClient(clientId: string) {
     const current = clients.find((client) => client.id === clientId);
     if (!current) return;
     const renamed = window.prompt("Новое имя клиента", current.name);
     if (!renamed) return;
+    const value = renamed.trim();
+    if (!value) return;
     setClients((prev) =>
-      prev.map((client) =>
-        client.id === clientId ? { ...client, name: renamed.trim() || client.name } : client,
-      ),
+      prev.map((client) => (client.id === clientId ? { ...client, name: value } : client)),
     );
+    if (supabase) {
+      const { error } = await supabase.from("clients").update({ name: value }).eq("id", clientId);
+      if (error) setAppError(error.message);
+    }
   }
 
-  function deleteClient(clientId: string) {
-    if (clients.length === 1) return;
+  async function deleteClient(clientId: string) {
+    if (!supabase) return;
     const target = clients.find((client) => client.id === clientId);
     if (!target) return;
     const accepted = window.confirm(`Удалить клиента "${target.name}"?`);
     if (!accepted) return;
+    const { error } = await supabase.from("clients").delete().eq("id", clientId);
+    if (error) {
+      setAppError(error.message);
+      return;
+    }
     const nextClients = clients.filter((client) => client.id !== clientId);
     setClients(nextClients);
     setResumeAnalysisByClient((prev) => {
@@ -821,9 +1177,24 @@ export default function Home() {
       return next;
     });
     if (clientId === activeClientId) {
-      setActiveClientId(nextClients[0].id);
+      setActiveClientId(nextClients[0]?.id || "");
       setGeneratedReport("");
       setIsReportOpen(false);
+    }
+  }
+
+  async function reassignClient(clientId: string, consultantId: string) {
+    if (!supabase || userRole !== "admin") return;
+    setClients((prev) =>
+      prev.map((client) => (client.id === clientId ? { ...client, consultantId } : client)),
+    );
+    const { error } = await supabase
+      .from("clients")
+      .update({ consultant_id: consultantId })
+      .eq("id", clientId);
+    if (error) {
+      setAppError(error.message);
+      await loadAllDataForUser(user!);
     }
   }
 
@@ -836,6 +1207,7 @@ export default function Home() {
   }
 
   async function ensureResumeAnalysis(clientSnapshot: Client, force = false, file?: File) {
+    if (!supabase) throw new Error("Supabase не инициализирован.");
     const currentFingerprint = buildResumeFingerprint(clientSnapshot, file);
     const cached = resumeAnalysisByClient[clientSnapshot.id];
     if (
@@ -845,6 +1217,10 @@ export default function Home() {
       isCacheFresh(cached.timestamp)
     ) {
       return cached.profile;
+    }
+
+    if (!clientSnapshot.resume.trim()) {
+      throw new Error("Для анализа резюме нужен текст или PDF файл.");
     }
 
     const resumePrompt = [
@@ -863,10 +1239,6 @@ export default function Home() {
       `Target role hint: ${clientSnapshot.targetRole || "unknown"}.`,
       `Location hint: ${clientSnapshot.location || "unknown"}.`,
     ].join("\n");
-
-    if (!clientSnapshot.resume.trim()) {
-      throw new Error("Для анализа резюме нужен текст или PDF файл.");
-    }
 
     setIsResumeAnalyzing(true);
     try {
@@ -896,11 +1268,25 @@ export default function Home() {
       );
       const profile = normalizeResumeProfile(raw, clientSnapshot.location || "United States");
 
+      const { data, error } = await supabase
+        .from("resume_analysis")
+        .upsert(
+          {
+            client_id: clientSnapshot.id,
+            profile,
+            source_fingerprint: currentFingerprint,
+          },
+          { onConflict: "client_id" },
+        )
+        .select("*")
+        .single();
+      if (error || !data) throw error ?? new Error("Не удалось сохранить анализ резюме.");
+
       setResumeAnalysisByClient((prev) => ({
         ...prev,
         [clientSnapshot.id]: {
           profile,
-          timestamp: Date.now(),
+          timestamp: timestampFromIso(data.updated_at),
           sourceFingerprint: currentFingerprint,
         },
       }));
@@ -1161,12 +1547,8 @@ export default function Home() {
     score = clamp(score, 0, 100);
 
     const reason = [
-      roleHits > 0
-        ? `Совпали ролевые маркеры (${roleHits})`
-        : "Слабые ролевые маркеры",
-      skillHits > 0
-        ? `навыков из резюме совпало: ${skillHits}`
-        : "нет явных совпадений навыков",
+      roleHits > 0 ? `Совпали ролевые маркеры (${roleHits})` : "Слабые ролевые маркеры",
+      skillHits > 0 ? `навыков из резюме совпало: ${skillHits}` : "нет явных совпадений навыков",
       locationMatched ? "локация релевантна" : "локация частично расходится",
       seniorityMatched ? "уровень подходит" : "уровень выше профиля",
       sizeMatched ? "размер компании в приоритете" : "размер компании не в приоритете",
@@ -1225,7 +1607,7 @@ export default function Home() {
           evidence: item.fitReason || "Вакансия получена из fallback-движка RoleRadar.",
           outreachMessage:
             item.outreachTip ||
-            `Hi, I saw this role and believe my profile is a strong fit. I would love to connect and share relevant experience.`,
+            "Hi, I saw this role and believe my profile is a strong fit. I would love to connect and share relevant experience.",
           fitScore: score,
           fitReason: item.fitReason || "Matched by fallback engine (US job boards).",
           status: previousStatuses.get(url) || "Найдено",
@@ -1251,10 +1633,76 @@ export default function Home() {
         hiringManager: job.hiringContactRole || "Hiring Manager",
         evidence: `Fallback signal based on active hiring for ${job.title} at ${job.company}.`,
         sourceUrl,
-        outreachMessage: `Hi, I noticed your team is actively hiring for ${job.title}. My background aligns well with this direction, and I'd value a quick conversation about potential fit and priorities.`,
+        outreachMessage:
+          `Hi, I noticed your team is actively hiring for ${job.title}. ` +
+          "My background aligns well with this direction, and I'd value a quick conversation about potential fit and priorities.",
         status: previousStatuses.get(`${job.company}|${triggerType}|${sourceUrl}`) || "Найдено",
       };
     });
+  }
+
+  async function persistJobsForClient(clientId: string, jobs: JobItem[]) {
+    if (!supabase) return;
+    await supabase.from("jobs").delete().eq("client_id", clientId);
+    if (!jobs.length) {
+      setJobsCacheByClient((prev) => ({ ...prev, [clientId]: { items: [], timestamp: Date.now() } }));
+      return;
+    }
+    const payload: Database["public"]["Tables"]["jobs"]["Insert"][] = jobs.map((job) => ({
+      client_id: clientId,
+      title: job.title,
+      company: job.company,
+      location: job.location,
+      url: normalizeJobUrl(job.url),
+      posted_at: job.postedAt || null,
+      source_variant: job.sourceVariant,
+      company_size: job.companySize,
+      hiring_contact_role: job.hiringContactRole,
+      evidence: job.evidence,
+      outreach_message: job.outreachMessage,
+      fit_score: clamp(job.fitScore, 0, 100),
+      fit_reason: job.fitReason,
+      status: parseOutreachStatus(job.status),
+    }));
+    const { data, error } = await supabase.from("jobs").insert(payload).select("*");
+    if (error) throw error;
+    const rows = (data || []).map(mapJobRow).sort((a, b) => b.fitScore - a.fitScore);
+    const timestamp = (data || []).reduce((max, row) => Math.max(max, timestampFromIso(row.updated_at)), 0);
+    setJobsCacheByClient((prev) => ({
+      ...prev,
+      [clientId]: { items: rows, timestamp: timestamp || Date.now() },
+    }));
+  }
+
+  async function persistSignalsForClient(clientId: string, signals: GrowthSignal[]) {
+    if (!supabase) return;
+    await supabase.from("signals").delete().eq("client_id", clientId);
+    if (!signals.length) {
+      setSignalsCacheByClient((prev) => ({ ...prev, [clientId]: { items: [], timestamp: Date.now() } }));
+      return;
+    }
+    const payload: Database["public"]["Tables"]["signals"]["Insert"][] = signals.map((signal) => ({
+      client_id: clientId,
+      company: signal.company,
+      trigger_type: signal.triggerType,
+      priority: signal.priority,
+      hiring_manager: signal.hiringManager,
+      evidence: signal.evidence,
+      source_url: normalizeJobUrl(signal.sourceUrl),
+      outreach_message: signal.outreachMessage,
+      status: parseOutreachStatus(signal.status),
+    }));
+    const { data, error } = await supabase.from("signals").insert(payload).select("*");
+    if (error) throw error;
+    const priorityRank: Record<SignalPriority, number> = { hot: 0, warm: 1, cold: 2 };
+    const rows = (data || [])
+      .map(mapSignalRow)
+      .sort((a, b) => priorityRank[a.priority] - priorityRank[b.priority]);
+    const timestamp = (data || []).reduce((max, row) => Math.max(max, timestampFromIso(row.updated_at)), 0);
+    setSignalsCacheByClient((prev) => ({
+      ...prev,
+      [clientId]: { items: rows, timestamp: timestamp || Date.now() },
+    }));
   }
 
   async function runJobsEngine(forceRefresh: boolean) {
@@ -1263,9 +1711,7 @@ export default function Home() {
     setIsJobsLoading(true);
     try {
       const cached = jobsCacheByClient[activeClient.id];
-      if (!forceRefresh && cached && isCacheFresh(cached.timestamp)) {
-        return;
-      }
+      if (!forceRefresh && cached && isCacheFresh(cached.timestamp)) return;
 
       const profile = await ensureResumeAnalysis(activeClient, false);
       const variants = [
@@ -1351,11 +1797,9 @@ export default function Home() {
         throw new Error("Claude не вернул вакансии. Попробуйте обновить анализ.");
       }
 
-      setJobsCacheByClient((prev) => ({
-        ...prev,
-        [activeClient.id]: { items: finalJobs, timestamp: Date.now() },
-      }));
+      await persistJobsForClient(activeClient.id, finalJobs);
       updateActiveClient({ lastAnalyzedAt: new Date().toISOString().slice(0, 10) });
+
       if (settledBatches.failed > 0) {
         setJobsError(
           `Часть источников недоступна (${settledBatches.failed}/${variants.length}), показаны частичные результаты.`,
@@ -1366,10 +1810,7 @@ export default function Home() {
       try {
         const fallbackJobs = await fetchJobsFromFallbackEngine(activeClient, previousStatuses);
         if (fallbackJobs.length > 0) {
-          setJobsCacheByClient((prev) => ({
-            ...prev,
-            [activeClient.id]: { items: fallbackJobs, timestamp: Date.now() },
-          }));
+          await persistJobsForClient(activeClient.id, fallbackJobs);
           setJobsError("Claude временно недоступен, показаны результаты из fallback job engine.");
         } else {
           setJobsError(humanizeClaudeError(error));
@@ -1451,9 +1892,7 @@ export default function Home() {
     setIsSignalsLoading(true);
     try {
       const cached = signalsCacheByClient[activeClient.id];
-      if (!forceRefresh && cached && isCacheFresh(cached.timestamp)) {
-        return;
-      }
+      if (!forceRefresh && cached && isCacheFresh(cached.timestamp)) return;
 
       const profile = await ensureResumeAnalysis(activeClient, false);
       const tasks: { trigger: SignalTrigger; query: string }[] = [
@@ -1515,13 +1954,7 @@ export default function Home() {
         })
         .sort((a, b) => priorityRank[a.priority] - priorityRank[b.priority]);
 
-      setSignalsCacheByClient((prev) => ({
-        ...prev,
-        [activeClient.id]: {
-          items: finalSignals,
-          timestamp: Date.now(),
-        },
-      }));
+      await persistSignalsForClient(activeClient.id, finalSignals);
       if (settledBatches.failed > 0) {
         setSignalsError(
           `Часть источников сигналов недоступна (${settledBatches.failed}/${tasks.length}), показаны частичные результаты.`,
@@ -1536,13 +1969,7 @@ export default function Home() {
       );
       const fallbackSignals = buildSignalsFallbackFromJobs(activeJobs, previousStatuses);
       if (fallbackSignals.length > 0) {
-        setSignalsCacheByClient((prev) => ({
-          ...prev,
-          [activeClient.id]: {
-            items: fallbackSignals,
-            timestamp: Date.now(),
-          },
-        }));
+        await persistSignalsForClient(activeClient.id, fallbackSignals);
         setSignalsError("Claude временно недоступен, показаны fallback сигналы по активным вакансиям.");
       } else {
         setSignalsError(humanizeClaudeError(error));
@@ -1553,7 +1980,7 @@ export default function Home() {
   }
 
   function updateJobStatus(jobId: string, status: OutreachStatus) {
-    if (!activeClient) return;
+    if (!activeClient || !supabase) return;
     setJobsCacheByClient((prev) => {
       const current = prev[activeClient.id];
       if (!current) return prev;
@@ -1565,10 +1992,11 @@ export default function Home() {
         },
       };
     });
+    void supabase.from("jobs").update({ status }).eq("id", jobId);
   }
 
   function updateSignalStatus(signalId: string, status: OutreachStatus) {
-    if (!activeClient) return;
+    if (!activeClient || !supabase) return;
     setSignalsCacheByClient((prev) => {
       const current = prev[activeClient.id];
       if (!current) return prev;
@@ -1582,6 +2010,7 @@ export default function Home() {
         },
       };
     });
+    void supabase.from("signals").update({ status }).eq("id", signalId);
   }
 
   function generateReport() {
@@ -1630,18 +2059,128 @@ export default function Home() {
     setIsReportOpen(true);
   }
 
-  const metrics = [
-    { label: "Найдено вакансий", value: pipelineSummary.jobsFound, hint: "по текущему поиску" },
-    { label: "High-fit вакансий", value: pipelineSummary.highMatches, hint: "fit score 80+" },
-    { label: "Сигналы роста", value: pipelineSummary.signalsFound, hint: "компании с признаками найма" },
-    { label: "Найдено контактов", value: pipelineSummary.contactsFound, hint: "по вакансиям и сигналам" },
-    { label: "Outreach отправлено", value: pipelineSummary.outreachSent, hint: "по статусам" },
-    { label: "Ответов получено", value: pipelineSummary.responses, hint: "по статусам" },
-    { label: "Конверсия", value: `${pipelineSummary.conversion}%`, hint: "ответы / outreach" },
-  ];
+  async function handleAuthSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!supabase) return;
+    if (!authEmail.trim() || !authPassword.trim()) {
+      setAuthError("Введите email и пароль.");
+      return;
+    }
+    setIsAuthActionLoading(true);
+    setAuthError("");
+    setAuthInfo("");
+    try {
+      if (authMode === "signin") {
+        const { error } = await supabase.auth.signInWithPassword({
+          email: authEmail.trim(),
+          password: authPassword,
+        });
+        if (error) throw error;
+      } else {
+        const { error } = await supabase.auth.signUp({
+          email: authEmail.trim(),
+          password: authPassword,
+        });
+        if (error) throw error;
+        setAuthInfo("Аккаунт создан. Если включено подтверждение email, проверьте почту.");
+      }
+    } catch (error) {
+      setAuthError(error instanceof Error ? error.message : "Ошибка авторизации.");
+    } finally {
+      setIsAuthActionLoading(false);
+    }
+  }
 
-  if (!activeClient) {
-    return <main className="p-8">Нет активного клиента.</main>;
+  async function handleSignOut() {
+    if (!supabase) return;
+    await supabase.auth.signOut();
+  }
+
+  if (supabaseError) {
+    return (
+      <main className="min-h-screen bg-slate-100 p-6">
+        <div className="mx-auto max-w-2xl rounded-2xl border border-rose-200 bg-white p-6">
+          <h1 className="text-xl font-semibold text-rose-700">Ошибка конфигурации Supabase</h1>
+          <p className="mt-2 text-sm text-slate-700">{supabaseError}</p>
+          <p className="mt-2 text-sm text-slate-700">
+            Проверьте переменные окружения: <code>NEXT_PUBLIC_SUPABASE_URL</code> и{" "}
+            <code>NEXT_PUBLIC_SUPABASE_ANON_KEY</code>.
+          </p>
+        </div>
+      </main>
+    );
+  }
+
+  if (isAuthLoading) {
+    return (
+      <main className="flex min-h-screen items-center justify-center bg-slate-100">
+        <p className="text-sm text-slate-600">Проверяем сессию...</p>
+      </main>
+    );
+  }
+
+  if (!user) {
+    return (
+      <main className="min-h-screen bg-gradient-to-b from-slate-100 to-slate-50 p-6">
+        <div className="mx-auto max-w-md rounded-3xl border border-slate-200 bg-white p-6 shadow-[0_12px_28px_-18px_rgba(15,23,42,0.4)]">
+          <p className="text-xs font-semibold uppercase tracking-[0.2em] text-blue-600">RoleRadar</p>
+          <h1 className="mt-2 text-2xl font-semibold">Вход в workspace</h1>
+          <p className="mt-1 text-sm text-slate-500">
+            Авторизуйтесь через Supabase Auth, чтобы увидеть клиентов.
+          </p>
+          <form className="mt-5 space-y-3" onSubmit={(event) => void handleAuthSubmit(event)}>
+            <div>
+              <label className="mb-1 block text-sm font-medium">Email</label>
+              <input
+                type="email"
+                value={authEmail}
+                onChange={(e) => setAuthEmail(e.target.value)}
+                className="h-11 w-full rounded-xl border border-slate-300 px-3 text-sm outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-100"
+                placeholder="name@company.com"
+              />
+            </div>
+            <div>
+              <label className="mb-1 block text-sm font-medium">Пароль</label>
+              <input
+                type="password"
+                value={authPassword}
+                onChange={(e) => setAuthPassword(e.target.value)}
+                className="h-11 w-full rounded-xl border border-slate-300 px-3 text-sm outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-100"
+                placeholder="••••••••"
+              />
+            </div>
+            {authError ? <p className="text-xs text-rose-700">{authError}</p> : null}
+            {authInfo ? <p className="text-xs text-emerald-700">{authInfo}</p> : null}
+            <button
+              type="submit"
+              disabled={isAuthActionLoading}
+              className="inline-flex h-11 w-full items-center justify-center rounded-xl bg-slate-900 px-5 text-sm font-medium text-white transition hover:bg-slate-800 disabled:opacity-70"
+            >
+              {isAuthActionLoading
+                ? "Проверяем..."
+                : authMode === "signin"
+                  ? "Войти"
+                  : "Создать аккаунт"}
+            </button>
+          </form>
+          <button
+            type="button"
+            onClick={() => setAuthMode((prev) => (prev === "signin" ? "signup" : "signin"))}
+            className="mt-3 text-xs font-medium text-blue-700 hover:text-blue-800"
+          >
+            {authMode === "signin" ? "Нет аккаунта? Создать" : "Уже есть аккаунт? Войти"}
+          </button>
+        </div>
+      </main>
+    );
+  }
+
+  if (appLoading) {
+    return (
+      <main className="flex min-h-screen items-center justify-center bg-slate-100">
+        <p className="text-sm text-slate-600">Загружаем клиентов и pipeline...</p>
+      </main>
+    );
   }
 
   return (
@@ -1654,25 +2193,61 @@ export default function Home() {
             </p>
             <h1 className="mt-2 text-2xl font-semibold tracking-tight">Клиентский workspace</h1>
             <p className="mt-1 text-sm text-slate-500">
-              Операционный pipeline для команды карьерных консультантов.
+              {userRole === "admin"
+                ? "Роль: admin — доступны все клиенты"
+                : "Роль: consultant — доступны только ваши клиенты"}
             </p>
-            <div className="mt-5 flex items-center gap-2">
+            <p className="mt-1 text-xs text-slate-500">{user.email}</p>
+            <div className="mt-4 flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => void loadAllDataForUser(user)}
+                className="inline-flex h-9 items-center justify-center rounded-lg border border-slate-300 bg-white px-3 text-xs font-semibold text-slate-700 hover:bg-slate-100"
+              >
+                Обновить данные
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleSignOut()}
+                className="inline-flex h-9 items-center justify-center rounded-lg border border-rose-200 bg-rose-50 px-3 text-xs font-semibold text-rose-700 hover:bg-rose-100"
+              >
+                Выйти
+              </button>
+            </div>
+            <div className="mt-5 space-y-2">
               <input
                 value={newClientName}
                 onChange={(e) => setNewClientName(e.target.value)}
                 onKeyDown={(e) => {
                   if (e.key === "Enter") {
                     e.preventDefault();
-                    addClient();
+                    void addClient();
                   }
                 }}
                 placeholder="Добавить клиента"
                 className="h-10 w-full rounded-xl border border-slate-300 px-3 text-sm outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-100"
               />
+              {userRole === "admin" ? (
+                <select
+                  value={newClientConsultantId}
+                  onChange={(e) => setNewClientConsultantId(e.target.value)}
+                  className="h-10 w-full rounded-xl border border-slate-300 px-3 text-sm outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-100"
+                >
+                  {consultants.length ? (
+                    consultants.map((consultant) => (
+                      <option key={consultant.id} value={consultant.id}>
+                        {consultant.fullName || consultant.email} ({consultant.role})
+                      </option>
+                    ))
+                  ) : (
+                    <option value="">Нет пользователей</option>
+                  )}
+                </select>
+              ) : null}
               <button
                 type="button"
-                onClick={addClient}
-                className="inline-flex h-10 shrink-0 items-center justify-center rounded-xl bg-blue-600 px-4 text-sm font-medium text-white shadow-sm transition hover:bg-blue-700 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-blue-200 active:translate-y-px active:bg-blue-800"
+                onClick={() => void addClient()}
+                className="inline-flex h-10 w-full items-center justify-center rounded-xl bg-blue-600 px-4 text-sm font-medium text-white shadow-sm transition hover:bg-blue-700 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-blue-200 active:translate-y-px"
               >
                 Добавить
               </button>
@@ -1683,6 +2258,7 @@ export default function Home() {
             {clients.map((client) => {
               const active = client.id === activeClientId;
               const jobsCount = jobsCacheByClient[client.id]?.items?.length || 0;
+              const owner = consultantById.get(client.consultantId);
               return (
                 <li
                   key={client.id}
@@ -1705,20 +2281,40 @@ export default function Home() {
                       {client.targetRole || "Целевая роль не указана"}
                     </p>
                     <p className="mt-1 text-xs text-slate-400">{jobsCount} вакансий в pipeline</p>
+                    <p className="mt-1 text-[11px] text-slate-500">
+                      Консультант: {owner?.fullName || owner?.email || "не назначен"}
+                    </p>
                   </button>
+                  {userRole === "admin" ? (
+                    <div className="mt-2">
+                      <label className="mb-1 block text-[11px] font-medium text-slate-500">
+                        Переназначить клиента
+                      </label>
+                      <select
+                        value={client.consultantId}
+                        onChange={(e) => void reassignClient(client.id, e.target.value)}
+                        className="h-8 w-full rounded-lg border border-slate-300 px-2 text-xs outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+                      >
+                        {consultants.map((consultant) => (
+                          <option key={consultant.id} value={consultant.id}>
+                            {consultant.fullName || consultant.email} ({consultant.role})
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  ) : null}
                   <div className="mt-3 flex items-center gap-2">
                     <button
                       type="button"
-                      onClick={() => renameClient(client.id)}
+                      onClick={() => void renameClient(client.id)}
                       className="rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-700 transition hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-200 active:translate-y-px"
                     >
                       Переименовать
                     </button>
                     <button
                       type="button"
-                      disabled={clients.length === 1}
-                      onClick={() => deleteClient(client.id)}
-                      className="rounded-lg border border-rose-200 bg-rose-50 px-2.5 py-1.5 text-xs font-medium text-rose-700 transition hover:bg-rose-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-200 active:translate-y-px disabled:cursor-not-allowed disabled:opacity-50"
+                      onClick={() => void deleteClient(client.id)}
+                      className="rounded-lg border border-rose-200 bg-rose-50 px-2.5 py-1.5 text-xs font-medium text-rose-700 transition hover:bg-rose-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-200 active:translate-y-px"
                     >
                       Удалить
                     </button>
@@ -1726,517 +2322,528 @@ export default function Home() {
                 </li>
               );
             })}
+            {!clients.length ? (
+              <li className="rounded-2xl border border-dashed border-slate-300 bg-slate-50 p-4 text-center text-sm text-slate-500">
+                Клиентов пока нет. Добавьте первого клиента.
+              </li>
+            ) : null}
           </ul>
         </aside>
 
         <section className="space-y-5">
-          <header className="rounded-3xl border border-slate-200 bg-white p-5 shadow-[0_8px_32px_-18px_rgba(15,23,42,0.35)]">
-            <div className="flex flex-wrap items-center justify-between gap-4">
-              <div>
-                <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-400">
-                  Активный клиент
-                </p>
-                <h2 className="mt-1 text-2xl font-semibold">{activeClient.name}</h2>
-                <p className="mt-1 text-sm text-slate-500">
-                  {activeClient.targetRole || "Роль не задана"} ·{" "}
-                  {activeClient.location || "Локация не задана"}
-                </p>
-              </div>
-              <div className="flex flex-wrap items-center gap-2">
-                <button
-                  type="button"
-                  onClick={() => void runJobsEngine(false)}
-                  disabled={isJobsLoading}
-                  className="inline-flex h-11 items-center justify-center rounded-xl bg-slate-900 px-5 text-sm font-medium text-white shadow-sm transition hover:bg-slate-800 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-slate-200 active:translate-y-px disabled:cursor-wait disabled:opacity-70"
-                >
-                  {isJobsLoading ? "Ищем вакансии..." : "Запустить анализ"}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => void runJobsEngine(true)}
-                  disabled={isJobsLoading}
-                  className="inline-flex h-11 items-center justify-center rounded-xl border border-slate-300 bg-white px-5 text-sm font-medium text-slate-800 shadow-sm transition hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-slate-200 active:translate-y-px disabled:opacity-70"
-                >
-                  Обновить
-                </button>
-                <button
-                  type="button"
-                  onClick={generateReport}
-                  className="inline-flex h-11 items-center justify-center rounded-xl bg-blue-600 px-5 text-sm font-medium text-white shadow-sm transition hover:bg-blue-700 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-blue-200 active:translate-y-px"
-                >
-                  Сгенерировать отчёт
-                </button>
-              </div>
+          {appError ? (
+            <div className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">
+              {appError}
             </div>
-          </header>
+          ) : null}
 
-          <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
-            <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-[0_8px_32px_-18px_rgba(15,23,42,0.3)]">
-              <div className="flex items-center justify-between gap-3">
-                <div>
-                  <h3 className="text-lg font-semibold">Анализ резюме</h3>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => void runResumeReanalysis()}
-                  disabled={isResumeAnalyzing}
-                  className="inline-flex h-9 items-center justify-center rounded-lg border border-blue-300 bg-blue-50 px-3 text-xs font-semibold text-blue-800 transition hover:bg-blue-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-200 disabled:opacity-70"
-                >
-                  {isResumeAnalyzing ? "Анализ..." : "Переанализировать"}
-                </button>
-              </div>
-
-              <div className="mt-4 space-y-4">
-                <div
-                  onDragOver={(event) => {
-                    event.preventDefault();
-                    setDragActive(true);
-                  }}
-                  onDragLeave={(event) => {
-                    event.preventDefault();
-                    setDragActive(false);
-                  }}
-                  onDrop={onDropResume}
-                  className={`rounded-2xl border-2 border-dashed p-4 transition ${
-                    dragActive
-                      ? "border-blue-400 bg-blue-50"
-                      : "border-slate-300 bg-slate-50 hover:border-slate-400"
-                  }`}
-                >
-                  <p className="text-sm font-medium text-slate-700">Перетащите резюме (PDF или текст)</p>
-                  <p className="mt-1 text-xs text-slate-500">
-                    Можно загрузить файл или вставить текст резюме.
-                  </p>
-                  <div className="mt-3 flex items-center gap-2">
-                    <button
-                      type="button"
-                      onClick={() => fileInputRef.current?.click()}
-                      className="inline-flex h-9 items-center justify-center rounded-lg border border-slate-300 bg-white px-3 text-sm font-medium text-slate-700 transition hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-200 active:translate-y-px"
-                    >
-                      Загрузить файл
-                    </button>
-                    {activeClient.resumeFileName ? (
-                      <span className="rounded-lg bg-emerald-50 px-2.5 py-1.5 text-xs font-medium text-emerald-700">
-                        {activeClient.resumeFileName}
-                      </span>
-                    ) : (
-                      <span className="text-xs text-slate-500">Файл пока не загружен</span>
-                    )}
-                  </div>
-                  <input
-                    ref={fileInputRef}
-                    type="file"
-                    accept=".pdf,.txt,.md,.doc,.docx"
-                    onChange={onSelectResume}
-                    className="hidden"
-                  />
-                </div>
-
-                <div>
-                  <div className="mb-1 flex items-center justify-between gap-2">
-                    <label className="block text-sm font-medium">Текст резюме</label>
-                    <button
-                      type="button"
-                      onClick={pasteResumeFromClipboard}
-                      className="inline-flex h-8 items-center justify-center rounded-lg border border-slate-300 bg-white px-2.5 text-xs font-medium text-slate-700 transition hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-200 active:translate-y-px"
-                    >
-                      Вставить из буфера
-                    </button>
-                  </div>
-                  <textarea
-                    value={activeClient.resume}
-                    onChange={(e) => updateActiveClient({ resume: e.target.value })}
-                    onPaste={onPasteResume}
-                    rows={6}
-                    placeholder="Вставьте резюме клиента..."
-                    className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-100"
-                  />
-                  {resumeInputError ? <p className="mt-1 text-xs text-rose-700">{resumeInputError}</p> : null}
-                </div>
-
-                <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
-                  <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-                    Распаршенный профиль клиента
-                  </p>
-                  {activeResumeAnalysis ? (
-                    <div className="mt-2 grid grid-cols-1 gap-2 text-xs text-slate-700 sm:grid-cols-2">
-                      <p>
-                        <span className="font-semibold">Current titles:</span>{" "}
-                        {activeResumeAnalysis.profile.jobTitlesCurrent.join(", ") || "—"}
-                      </p>
-                      <p>
-                        <span className="font-semibold">Target titles:</span>{" "}
-                        {activeResumeAnalysis.profile.jobTitlesTarget.join(", ") || "—"}
-                      </p>
-                      <p>
-                        <span className="font-semibold">Опыт (лет):</span>{" "}
-                        {activeResumeAnalysis.profile.totalYearsExperience ?? "—"}
-                      </p>
-                      <p>
-                        <span className="font-semibold">Seniority:</span>{" "}
-                        {activeResumeAnalysis.profile.seniorityLevel || "—"}
-                      </p>
-                      <p className="sm:col-span-2">
-                        <span className="font-semibold">Top skills:</span>{" "}
-                        {activeResumeAnalysis.profile.topSkills.join(", ") || "—"}
-                      </p>
-                      <p className="sm:col-span-2">
-                        <span className="font-semibold">Industries:</span>{" "}
-                        {activeResumeAnalysis.profile.industries.join(", ") || "—"}
-                      </p>
-                      <p>
-                        <span className="font-semibold">Location:</span>{" "}
-                        {activeResumeAnalysis.profile.location || "—"}
-                      </p>
-                      <p>
-                        <span className="font-semibold">Preferred size:</span>{" "}
-                        {activeResumeAnalysis.profile.preferredCompanySize || "—"}
-                      </p>
-                      <p className="sm:col-span-2 text-slate-500">
-                        Последнее обновление: {relativeCacheAge(activeResumeAnalysis.timestamp)}
-                      </p>
-                    </div>
-                  ) : (
-                    <p className="mt-2 text-xs text-slate-500">
-                      Профиль появится после загрузки резюме или нажатия «Переанализировать».
+          {!activeClient ? (
+            <section className="rounded-3xl border border-slate-200 bg-white p-8 text-center">
+              <h2 className="text-xl font-semibold">Нет активного клиента</h2>
+              <p className="mt-2 text-sm text-slate-500">Добавьте клиента в левом меню, чтобы начать работу.</p>
+            </section>
+          ) : (
+            <>
+              <header className="rounded-3xl border border-slate-200 bg-white p-5 shadow-[0_8px_32px_-18px_rgba(15,23,42,0.35)]">
+                <div className="flex flex-wrap items-center justify-between gap-4">
+                  <div>
+                    <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-400">
+                      Активный клиент
                     </p>
-                  )}
-                </div>
-              </div>
-            </div>
-
-            <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-[0_8px_32px_-18px_rgba(15,23,42,0.3)]">
-              <h3 className="text-lg font-semibold">Параметры поиска</h3>
-              <p className="mt-1 text-sm text-slate-500">
-                Эти данные используются для подбора вакансий и сигналов.
-              </p>
-              <div className="mt-4 space-y-4">
-                <div>
-                  <label className="mb-1 block text-sm font-medium">Целевая роль</label>
-                  <input
-                    value={activeClient.targetRole}
-                    onChange={(e) => updateActiveClient({ targetRole: e.target.value })}
-                    placeholder="Например, Senior Product Manager"
-                    className="h-11 w-full rounded-xl border border-slate-300 px-3 text-sm outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-100"
-                  />
-                </div>
-                <div>
-                  <label className="mb-1 block text-sm font-medium">Локация</label>
-                  <input
-                    value={activeClient.location}
-                    onChange={(e) => updateActiveClient({ location: e.target.value })}
-                    placeholder="Например, Miami, FL"
-                    className="h-11 w-full rounded-xl border border-slate-300 px-3 text-sm outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-100"
-                  />
-                </div>
-                <div>
-                  <label className="mb-1 block text-sm font-medium">Уровень кандидата</label>
-                  <select
-                    value={activeClient.candidateLevel}
-                    onChange={(e) => updateActiveClient({ candidateLevel: e.target.value as CandidateLevel })}
-                    className="h-11 w-full rounded-xl border border-slate-300 px-3 text-sm outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-100"
-                  >
-                    {CANDIDATE_LEVEL_OPTIONS.map((option) => (
-                      <option key={option.value} value={option.value}>
-                        {option.label}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-                <div>
-                  <p className="mb-2 block text-sm font-medium">Размер компаний</p>
-                  <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
-                    {COMPANY_SIZE_OPTIONS.map((option) => {
-                      const checked = activeClient.preferredCompanySizes.includes(option.value);
-                      return (
-                        <label
-                          key={option.value}
-                          className={`flex cursor-pointer items-center gap-2 rounded-xl border px-3 py-2 text-sm transition ${
-                            checked
-                              ? "border-blue-300 bg-blue-50 text-blue-900"
-                              : "border-slate-300 bg-white text-slate-700 hover:border-slate-400"
-                          }`}
-                        >
-                          <input
-                            type="checkbox"
-                            checked={checked}
-                            onChange={(e) => {
-                              const next = e.target.checked
-                                ? [...activeClient.preferredCompanySizes, option.value]
-                                : activeClient.preferredCompanySizes.filter((size) => size !== option.value);
-                              if (!next.length) return;
-                              updateActiveClient({ preferredCompanySizes: next });
-                            }}
-                            className="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-300"
-                          />
-                          <span>{option.label}</span>
-                        </label>
-                      );
-                    })}
+                    <h2 className="mt-1 text-2xl font-semibold">{activeClient.name}</h2>
+                    <p className="mt-1 text-sm text-slate-500">
+                      {activeClient.targetRole || "Роль не задана"} · {activeClient.location || "Локация не задана"}
+                    </p>
                   </div>
-                </div>
-                <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-sm text-slate-600">
-                  Последний запуск вакансий:{" "}
-                  <span className="font-medium text-slate-800">
-                    {relativeCacheAge(activeJobsCache?.timestamp)}
-                  </span>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <section className="rounded-3xl border border-slate-200 bg-white p-5 shadow-[0_8px_32px_-18px_rgba(15,23,42,0.3)]">
-            <h3 className="text-xl font-semibold">Сводка по пайплайну</h3>
-            <p className="text-sm text-slate-500">KPI по вакансиям, сигналам и outreach-статусам</p>
-            <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
-              {metrics.map((metric, index) => (
-                <article
-                  key={metric.label}
-                  className={`rounded-2xl border bg-gradient-to-br p-4 ${metricTone(index)}`}
-                >
-                  <p className="text-xs font-medium uppercase tracking-wide text-slate-500">
-                    {metric.label}
-                  </p>
-                  <p className="mt-2 text-3xl font-semibold tracking-tight">{metric.value}</p>
-                  <p className="mt-1 text-xs text-slate-500">{metric.hint}</p>
-                </article>
-              ))}
-            </div>
-          </section>
-
-          <section className="rounded-3xl border border-slate-200 bg-white p-5 shadow-[0_8px_32px_-18px_rgba(15,23,42,0.3)]">
-            <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-              <div className="inline-flex rounded-xl border border-slate-200 bg-slate-50 p-1">
-                <button
-                  type="button"
-                  onClick={() => setWorkspaceTab("jobs")}
-                  className={`rounded-lg px-4 py-2 text-sm font-medium transition ${
-                    workspaceTab === "jobs"
-                      ? "bg-white text-slate-900 shadow-sm"
-                      : "text-slate-600 hover:text-slate-900"
-                  }`}
-                >
-                  Движок вакансий
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setWorkspaceTab("signals")}
-                  className={`rounded-lg px-4 py-2 text-sm font-medium transition ${
-                    workspaceTab === "signals"
-                      ? "bg-white text-slate-900 shadow-sm"
-                      : "text-slate-600 hover:text-slate-900"
-                  }`}
-                >
-                  Сигналы роста
-                </button>
-              </div>
-              <div className="flex items-center gap-2">
-                {workspaceTab === "jobs" ? (
-                  <>
+                  <div className="flex flex-wrap items-center gap-2">
                     <button
                       type="button"
                       onClick={() => void runJobsEngine(false)}
                       disabled={isJobsLoading}
-                      className="inline-flex h-10 items-center justify-center rounded-xl bg-slate-900 px-4 text-sm font-medium text-white transition hover:bg-slate-800 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-slate-200 disabled:opacity-70"
+                      className="inline-flex h-11 items-center justify-center rounded-xl bg-slate-900 px-5 text-sm font-medium text-white shadow-sm transition hover:bg-slate-800 disabled:cursor-wait disabled:opacity-70"
                     >
-                      {isJobsLoading ? "Загрузка..." : "Запустить"}
+                      {isJobsLoading ? "Ищем вакансии..." : "Запустить анализ"}
                     </button>
                     <button
                       type="button"
                       onClick={() => void runJobsEngine(true)}
                       disabled={isJobsLoading}
-                      className="inline-flex h-10 items-center justify-center rounded-xl border border-slate-300 bg-white px-4 text-sm font-medium text-slate-700 transition hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-slate-200 disabled:opacity-70"
+                      className="inline-flex h-11 items-center justify-center rounded-xl border border-slate-300 bg-white px-5 text-sm font-medium text-slate-800 shadow-sm transition hover:bg-slate-100 disabled:opacity-70"
                     >
                       Обновить
                     </button>
+                    <button
+                      type="button"
+                      onClick={generateReport}
+                      className="inline-flex h-11 items-center justify-center rounded-xl bg-blue-600 px-5 text-sm font-medium text-white shadow-sm transition hover:bg-blue-700"
+                    >
+                      Сгенерировать отчёт
+                    </button>
+                  </div>
+                </div>
+              </header>
+
+              <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
+                <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-[0_8px_32px_-18px_rgba(15,23,42,0.3)]">
+                  <div className="flex items-center justify-between gap-3">
+                    <h3 className="text-lg font-semibold">Анализ резюме</h3>
+                    <button
+                      type="button"
+                      onClick={() => void runResumeReanalysis()}
+                      disabled={isResumeAnalyzing}
+                      className="inline-flex h-9 items-center justify-center rounded-lg border border-blue-300 bg-blue-50 px-3 text-xs font-semibold text-blue-800 transition hover:bg-blue-100 disabled:opacity-70"
+                    >
+                      {isResumeAnalyzing ? "Анализ..." : "Переанализировать"}
+                    </button>
+                  </div>
+
+                  <div className="mt-4 space-y-4">
+                    <div
+                      onDragOver={(event) => {
+                        event.preventDefault();
+                        setDragActive(true);
+                      }}
+                      onDragLeave={(event) => {
+                        event.preventDefault();
+                        setDragActive(false);
+                      }}
+                      onDrop={onDropResume}
+                      className={`rounded-2xl border-2 border-dashed p-4 transition ${
+                        dragActive ? "border-blue-400 bg-blue-50" : "border-slate-300 bg-slate-50 hover:border-slate-400"
+                      }`}
+                    >
+                      <p className="text-sm font-medium text-slate-700">Перетащите резюме (PDF или текст)</p>
+                      <p className="mt-1 text-xs text-slate-500">Можно загрузить файл или вставить текст резюме.</p>
+                      <div className="mt-3 flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => fileInputRef.current?.click()}
+                          className="inline-flex h-9 items-center justify-center rounded-lg border border-slate-300 bg-white px-3 text-sm font-medium text-slate-700 transition hover:bg-slate-100"
+                        >
+                          Загрузить файл
+                        </button>
+                        {activeClient.resumeFileName ? (
+                          <span className="rounded-lg bg-emerald-50 px-2.5 py-1.5 text-xs font-medium text-emerald-700">
+                            {activeClient.resumeFileName}
+                          </span>
+                        ) : (
+                          <span className="text-xs text-slate-500">Файл пока не загружен</span>
+                        )}
+                      </div>
+                      <input
+                        ref={fileInputRef}
+                        type="file"
+                        accept=".pdf,.txt,.md,.doc,.docx"
+                        onChange={onSelectResume}
+                        className="hidden"
+                      />
+                    </div>
+
+                    <div>
+                      <div className="mb-1 flex items-center justify-between gap-2">
+                        <label className="block text-sm font-medium">Текст резюме</label>
+                        <button
+                          type="button"
+                          onClick={pasteResumeFromClipboard}
+                          className="inline-flex h-8 items-center justify-center rounded-lg border border-slate-300 bg-white px-2.5 text-xs font-medium text-slate-700 transition hover:bg-slate-100"
+                        >
+                          Вставить из буфера
+                        </button>
+                      </div>
+                      <textarea
+                        value={activeClient.resume}
+                        onChange={(e) => updateActiveClient({ resume: e.target.value })}
+                        onPaste={onPasteResume}
+                        rows={6}
+                        placeholder="Вставьте резюме клиента..."
+                        className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-100"
+                      />
+                      {resumeInputError ? <p className="mt-1 text-xs text-rose-700">{resumeInputError}</p> : null}
+                    </div>
+
+                    <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+                      <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                        Распаршенный профиль клиента
+                      </p>
+                      {activeResumeAnalysis ? (
+                        <div className="mt-2 grid grid-cols-1 gap-2 text-xs text-slate-700 sm:grid-cols-2">
+                          <p>
+                            <span className="font-semibold">Current titles:</span>{" "}
+                            {activeResumeAnalysis.profile.jobTitlesCurrent.join(", ") || "—"}
+                          </p>
+                          <p>
+                            <span className="font-semibold">Target titles:</span>{" "}
+                            {activeResumeAnalysis.profile.jobTitlesTarget.join(", ") || "—"}
+                          </p>
+                          <p>
+                            <span className="font-semibold">Опыт (лет):</span>{" "}
+                            {activeResumeAnalysis.profile.totalYearsExperience ?? "—"}
+                          </p>
+                          <p>
+                            <span className="font-semibold">Seniority:</span>{" "}
+                            {activeResumeAnalysis.profile.seniorityLevel || "—"}
+                          </p>
+                          <p className="sm:col-span-2">
+                            <span className="font-semibold">Top skills:</span>{" "}
+                            {activeResumeAnalysis.profile.topSkills.join(", ") || "—"}
+                          </p>
+                          <p className="sm:col-span-2">
+                            <span className="font-semibold">Industries:</span>{" "}
+                            {activeResumeAnalysis.profile.industries.join(", ") || "—"}
+                          </p>
+                          <p>
+                            <span className="font-semibold">Location:</span>{" "}
+                            {activeResumeAnalysis.profile.location || "—"}
+                          </p>
+                          <p>
+                            <span className="font-semibold">Preferred size:</span>{" "}
+                            {activeResumeAnalysis.profile.preferredCompanySize || "—"}
+                          </p>
+                          <p className="sm:col-span-2 text-slate-500">
+                            Последнее обновление: {relativeCacheAge(activeResumeAnalysis.timestamp)}
+                          </p>
+                        </div>
+                      ) : (
+                        <p className="mt-2 text-xs text-slate-500">
+                          Профиль появится после загрузки резюме или нажатия «Переанализировать».
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-[0_8px_32px_-18px_rgba(15,23,42,0.3)]">
+                  <h3 className="text-lg font-semibold">Параметры поиска</h3>
+                  <p className="mt-1 text-sm text-slate-500">
+                    Эти данные используются для подбора вакансий и сигналов.
+                  </p>
+                  <div className="mt-4 space-y-4">
+                    <div>
+                      <label className="mb-1 block text-sm font-medium">Целевая роль</label>
+                      <input
+                        value={activeClient.targetRole}
+                        onChange={(e) => updateActiveClient({ targetRole: e.target.value })}
+                        placeholder="Например, Senior Product Manager"
+                        className="h-11 w-full rounded-xl border border-slate-300 px-3 text-sm outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-100"
+                      />
+                    </div>
+                    <div>
+                      <label className="mb-1 block text-sm font-medium">Локация</label>
+                      <input
+                        value={activeClient.location}
+                        onChange={(e) => updateActiveClient({ location: e.target.value })}
+                        placeholder="Например, Miami, FL"
+                        className="h-11 w-full rounded-xl border border-slate-300 px-3 text-sm outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-100"
+                      />
+                    </div>
+                    <div>
+                      <label className="mb-1 block text-sm font-medium">Уровень кандидата</label>
+                      <select
+                        value={activeClient.candidateLevel}
+                        onChange={(e) => updateActiveClient({ candidateLevel: e.target.value as CandidateLevel })}
+                        className="h-11 w-full rounded-xl border border-slate-300 px-3 text-sm outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-100"
+                      >
+                        {CANDIDATE_LEVEL_OPTIONS.map((option) => (
+                          <option key={option.value} value={option.value}>
+                            {option.label}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <div>
+                      <p className="mb-2 block text-sm font-medium">Размер компаний</p>
+                      <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+                        {COMPANY_SIZE_OPTIONS.map((option) => {
+                          const checked = activeClient.preferredCompanySizes.includes(option.value);
+                          return (
+                            <label
+                              key={option.value}
+                              className={`flex cursor-pointer items-center gap-2 rounded-xl border px-3 py-2 text-sm transition ${
+                                checked
+                                  ? "border-blue-300 bg-blue-50 text-blue-900"
+                                  : "border-slate-300 bg-white text-slate-700 hover:border-slate-400"
+                              }`}
+                            >
+                              <input
+                                type="checkbox"
+                                checked={checked}
+                                onChange={(e) => {
+                                  const next = e.target.checked
+                                    ? [...activeClient.preferredCompanySizes, option.value]
+                                    : activeClient.preferredCompanySizes.filter((size) => size !== option.value);
+                                  if (!next.length) return;
+                                  updateActiveClient({ preferredCompanySizes: next });
+                                }}
+                                className="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-300"
+                              />
+                              <span>{option.label}</span>
+                            </label>
+                          );
+                        })}
+                      </div>
+                    </div>
+                    <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-sm text-slate-600">
+                      Последний запуск вакансий:{" "}
+                      <span className="font-medium text-slate-800">
+                        {relativeCacheAge(activeJobsCache?.timestamp)}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <section className="rounded-3xl border border-slate-200 bg-white p-5 shadow-[0_8px_32px_-18px_rgba(15,23,42,0.3)]">
+                <h3 className="text-xl font-semibold">Сводка по пайплайну</h3>
+                <p className="text-sm text-slate-500">KPI по вакансиям, сигналам и outreach-статусам</p>
+                <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                  {metrics.map((metric, index) => (
+                    <article
+                      key={metric.label}
+                      className={`rounded-2xl border bg-gradient-to-br p-4 ${metricTone(index)}`}
+                    >
+                      <p className="text-xs font-medium uppercase tracking-wide text-slate-500">
+                        {metric.label}
+                      </p>
+                      <p className="mt-2 text-3xl font-semibold tracking-tight">{metric.value}</p>
+                      <p className="mt-1 text-xs text-slate-500">{metric.hint}</p>
+                    </article>
+                  ))}
+                </div>
+              </section>
+
+              <section className="rounded-3xl border border-slate-200 bg-white p-5 shadow-[0_8px_32px_-18px_rgba(15,23,42,0.3)]">
+                <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+                  <div className="inline-flex rounded-xl border border-slate-200 bg-slate-50 p-1">
+                    <button
+                      type="button"
+                      onClick={() => setWorkspaceTab("jobs")}
+                      className={`rounded-lg px-4 py-2 text-sm font-medium transition ${
+                        workspaceTab === "jobs"
+                          ? "bg-white text-slate-900 shadow-sm"
+                          : "text-slate-600 hover:text-slate-900"
+                      }`}
+                    >
+                      Движок вакансий
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setWorkspaceTab("signals")}
+                      className={`rounded-lg px-4 py-2 text-sm font-medium transition ${
+                        workspaceTab === "signals"
+                          ? "bg-white text-slate-900 shadow-sm"
+                          : "text-slate-600 hover:text-slate-900"
+                      }`}
+                    >
+                      Сигналы роста
+                    </button>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    {workspaceTab === "jobs" ? (
+                      <>
+                        <button
+                          type="button"
+                          onClick={() => void runJobsEngine(false)}
+                          disabled={isJobsLoading}
+                          className="inline-flex h-10 items-center justify-center rounded-xl bg-slate-900 px-4 text-sm font-medium text-white transition hover:bg-slate-800 disabled:opacity-70"
+                        >
+                          {isJobsLoading ? "Загрузка..." : "Запустить"}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void runJobsEngine(true)}
+                          disabled={isJobsLoading}
+                          className="inline-flex h-10 items-center justify-center rounded-xl border border-slate-300 bg-white px-4 text-sm font-medium text-slate-700 transition hover:bg-slate-100 disabled:opacity-70"
+                        >
+                          Обновить
+                        </button>
+                      </>
+                    ) : (
+                      <>
+                        <button
+                          type="button"
+                          onClick={() => void runSignalsEngine(false)}
+                          disabled={isSignalsLoading}
+                          className="inline-flex h-10 items-center justify-center rounded-xl bg-slate-900 px-4 text-sm font-medium text-white transition hover:bg-slate-800 disabled:opacity-70"
+                        >
+                          {isSignalsLoading ? "Загрузка..." : "Запустить сигналы"}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void runSignalsEngine(true)}
+                          disabled={isSignalsLoading}
+                          className="inline-flex h-10 items-center justify-center rounded-xl border border-slate-300 bg-white px-4 text-sm font-medium text-slate-700 transition hover:bg-slate-100 disabled:opacity-70"
+                        >
+                          Обновить
+                        </button>
+                      </>
+                    )}
+                  </div>
+                </div>
+
+                {workspaceTab === "jobs" ? (
+                  <>
+                    {jobsError ? (
+                      <div className="mb-4 rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">
+                        {jobsError}
+                      </div>
+                    ) : null}
+                    {!activeJobs.length ? (
+                      <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50 p-10 text-center">
+                        <p className="text-sm font-medium text-slate-700">Пока нет вакансий для клиента</p>
+                        <p className="mt-1 text-sm text-slate-500">
+                          Нажмите «Запустить», чтобы собрать актуальные вакансии.
+                        </p>
+                      </div>
+                    ) : (
+                      <div className="space-y-3">
+                        {activeJobs.map((job) => (
+                          <article
+                            key={job.id}
+                            className="rounded-2xl border border-slate-200 bg-slate-50/60 p-4 transition hover:border-slate-300 hover:bg-white"
+                          >
+                            <div className="flex flex-wrap items-start justify-between gap-3">
+                              <div>
+                                <h4 className="text-base font-semibold text-slate-900">{job.title}</h4>
+                                <p className="text-sm text-slate-500">
+                                  {job.company} · {job.location}
+                                </p>
+                                <p className="mt-1 text-xs text-slate-400">
+                                  Вариант: {job.sourceVariant} · Размер: {job.companySize}
+                                </p>
+                              </div>
+                              <span className={`rounded-full border px-3 py-1 text-xs font-semibold ${scoreTone(job.fitScore)}`}>
+                                Fit {job.fitScore}%
+                              </span>
+                            </div>
+
+                            <p className="mt-2 text-sm text-slate-700">{job.fitReason}</p>
+                            <p className="mt-1 text-xs text-slate-500">{job.evidence}</p>
+                            <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-[1fr_auto]">
+                              <div className="rounded-xl border border-blue-100 bg-blue-50/60 p-3">
+                                <p className="text-xs font-semibold uppercase tracking-wide text-blue-800">
+                                  Кому писать
+                                </p>
+                                <p className="mt-1 text-sm text-slate-700">{job.hiringContactRole}</p>
+                                <p className="mt-2 text-sm text-slate-700">{job.outreachMessage}</p>
+                                <a
+                                  href={job.url}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  className="mt-2 inline-flex text-xs font-semibold text-blue-700 underline decoration-blue-300 underline-offset-2 hover:text-blue-800"
+                                >
+                                  Открыть вакансию
+                                </a>
+                              </div>
+                              <div className="min-w-[190px] rounded-xl border border-slate-200 bg-white p-3">
+                                <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">
+                                  Статус outreach
+                                </label>
+                                <select
+                                  value={job.status}
+                                  onChange={(e) => updateJobStatus(job.id, parseOutreachStatus(e.target.value))}
+                                  className="h-10 w-full rounded-lg border border-slate-300 bg-white px-2 text-sm outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+                                >
+                                  {OUTREACH_STATUS_OPTIONS.map((status) => (
+                                    <option key={status} value={status}>
+                                      {status}
+                                    </option>
+                                  ))}
+                                </select>
+                              </div>
+                            </div>
+                          </article>
+                        ))}
+                      </div>
+                    )}
                   </>
                 ) : (
                   <>
-                    <button
-                      type="button"
-                      onClick={() => void runSignalsEngine(false)}
-                      disabled={isSignalsLoading}
-                      className="inline-flex h-10 items-center justify-center rounded-xl bg-slate-900 px-4 text-sm font-medium text-white transition hover:bg-slate-800 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-slate-200 disabled:opacity-70"
-                    >
-                      {isSignalsLoading ? "Загрузка..." : "Запустить сигналы"}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => void runSignalsEngine(true)}
-                      disabled={isSignalsLoading}
-                      className="inline-flex h-10 items-center justify-center rounded-xl border border-slate-300 bg-white px-4 text-sm font-medium text-slate-700 transition hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-slate-200 disabled:opacity-70"
-                    >
-                      Обновить
-                    </button>
+                    {signalsError ? (
+                      <div className="mb-4 rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">
+                        {signalsError}
+                      </div>
+                    ) : null}
+                    {!activeSignals.length ? (
+                      <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50 p-10 text-center">
+                        <p className="text-sm font-medium text-slate-700">Сигналы роста пока не собраны</p>
+                        <p className="mt-1 text-sm text-slate-500">
+                          Нажмите «Запустить сигналы», чтобы получить funding / expansion / key hire / contract триггеры.
+                        </p>
+                      </div>
+                    ) : (
+                      <div className="space-y-3">
+                        {activeSignals.map((signal) => {
+                          const priorityStyle =
+                            signal.priority === "hot"
+                              ? "border-rose-200 bg-rose-50"
+                              : signal.priority === "warm"
+                                ? "border-amber-200 bg-amber-50"
+                                : "border-slate-200 bg-slate-50";
+                          return (
+                            <article key={signal.id} className={`rounded-2xl border p-4 ${priorityStyle}`}>
+                              <div className="flex flex-wrap items-start justify-between gap-3">
+                                <div>
+                                  <h4 className="text-base font-semibold text-slate-900">{signal.company}</h4>
+                                  <p className="text-sm text-slate-600">
+                                    Trigger: {signal.triggerType} · Priority: {signal.priority.toUpperCase()}
+                                  </p>
+                                </div>
+                                <span
+                                  className={`rounded-full px-2.5 py-1 text-xs font-semibold ${
+                                    signal.priority === "hot"
+                                      ? "bg-rose-100 text-rose-700"
+                                      : signal.priority === "warm"
+                                        ? "bg-amber-100 text-amber-700"
+                                        : "bg-slate-100 text-slate-700"
+                                  }`}
+                                >
+                                  {signal.priority}
+                                </span>
+                              </div>
+                              <p className="mt-2 text-sm text-slate-700">{signal.evidence}</p>
+                              <p className="mt-1 text-xs text-slate-500">Hiring manager: {signal.hiringManager}</p>
+                              <div className="mt-3 rounded-xl border border-blue-100 bg-blue-50/60 p-3">
+                                <p className="text-xs font-semibold uppercase tracking-wide text-blue-800">
+                                  Outreach message (EN)
+                                </p>
+                                <p className="mt-1 text-sm text-slate-700">{signal.outreachMessage}</p>
+                                <a
+                                  href={signal.sourceUrl}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  className="mt-2 inline-flex text-xs font-semibold text-blue-700 underline decoration-blue-300 underline-offset-2 hover:text-blue-800"
+                                >
+                                  Источник сигнала
+                                </a>
+                              </div>
+                              <div className="mt-3 max-w-[260px] rounded-xl border border-slate-200 bg-white p-3">
+                                <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">
+                                  Статус outreach
+                                </label>
+                                <select
+                                  value={signal.status}
+                                  onChange={(e) =>
+                                    updateSignalStatus(signal.id, parseOutreachStatus(e.target.value))
+                                  }
+                                  className="h-10 w-full rounded-lg border border-slate-300 bg-white px-2 text-sm outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+                                >
+                                  {OUTREACH_STATUS_OPTIONS.map((status) => (
+                                    <option key={status} value={status}>
+                                      {status}
+                                    </option>
+                                  ))}
+                                </select>
+                              </div>
+                            </article>
+                          );
+                        })}
+                      </div>
+                    )}
                   </>
                 )}
-              </div>
-            </div>
-
-            {workspaceTab === "jobs" ? (
-              <>
-                {jobsError ? (
-                  <div className="mb-4 rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">
-                    {jobsError}
-                  </div>
-                ) : null}
-                {!activeJobs.length ? (
-                  <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50 p-10 text-center">
-                    <p className="text-sm font-medium text-slate-700">Пока нет вакансий для клиента</p>
-                    <p className="mt-1 text-sm text-slate-500">
-                      Нажмите «Запустить», чтобы собрать актуальные вакансии.
-                    </p>
-                  </div>
-                ) : (
-                  <div className="space-y-3">
-                    {activeJobs.map((job) => (
-                      <article
-                        key={job.id}
-                        className="rounded-2xl border border-slate-200 bg-slate-50/60 p-4 transition hover:border-slate-300 hover:bg-white"
-                      >
-                        <div className="flex flex-wrap items-start justify-between gap-3">
-                          <div>
-                            <h4 className="text-base font-semibold text-slate-900">{job.title}</h4>
-                            <p className="text-sm text-slate-500">
-                              {job.company} · {job.location}
-                            </p>
-                            <p className="mt-1 text-xs text-slate-400">
-                              Вариант: {job.sourceVariant} · Размер: {job.companySize}
-                            </p>
-                          </div>
-                          <span className={`rounded-full border px-3 py-1 text-xs font-semibold ${scoreTone(job.fitScore)}`}>
-                            Fit {job.fitScore}%
-                          </span>
-                        </div>
-
-                        <p className="mt-2 text-sm text-slate-700">{job.fitReason}</p>
-                        <p className="mt-1 text-xs text-slate-500">{job.evidence}</p>
-                        <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-[1fr_auto]">
-                          <div className="rounded-xl border border-blue-100 bg-blue-50/60 p-3">
-                            <p className="text-xs font-semibold uppercase tracking-wide text-blue-800">
-                              Кому писать
-                            </p>
-                            <p className="mt-1 text-sm text-slate-700">{job.hiringContactRole}</p>
-                            <p className="mt-2 text-sm text-slate-700">{job.outreachMessage}</p>
-                            <div className="mt-2 flex flex-wrap items-center gap-3">
-                              <a
-                                href={job.url}
-                                target="_blank"
-                                rel="noreferrer"
-                                className="inline-flex text-xs font-semibold text-blue-700 underline decoration-blue-300 underline-offset-2 hover:text-blue-800"
-                              >
-                                Открыть вакансию
-                              </a>
-                            </div>
-                          </div>
-                          <div className="min-w-[190px] rounded-xl border border-slate-200 bg-white p-3">
-                            <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">
-                              Статус outreach
-                            </label>
-                            <select
-                              value={job.status}
-                              onChange={(e) => updateJobStatus(job.id, parseOutreachStatus(e.target.value))}
-                              className="h-10 w-full rounded-lg border border-slate-300 bg-white px-2 text-sm outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
-                            >
-                              {OUTREACH_STATUS_OPTIONS.map((status) => (
-                                <option key={status} value={status}>
-                                  {status}
-                                </option>
-                              ))}
-                            </select>
-                          </div>
-                        </div>
-                      </article>
-                    ))}
-                  </div>
-                )}
-              </>
-            ) : (
-              <>
-                {signalsError ? (
-                  <div className="mb-4 rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">
-                    {signalsError}
-                  </div>
-                ) : null}
-                {!activeSignals.length ? (
-                  <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50 p-10 text-center">
-                    <p className="text-sm font-medium text-slate-700">Сигналы роста пока не собраны</p>
-                    <p className="mt-1 text-sm text-slate-500">
-                      Нажмите «Запустить сигналы», чтобы получить funding / expansion / key hire / contract триггеры.
-                    </p>
-                  </div>
-                ) : (
-                  <div className="space-y-3">
-                    {activeSignals.map((signal) => {
-                      const priorityStyle =
-                        signal.priority === "hot"
-                          ? "border-rose-200 bg-rose-50"
-                          : signal.priority === "warm"
-                            ? "border-amber-200 bg-amber-50"
-                            : "border-slate-200 bg-slate-50";
-                      return (
-                        <article key={signal.id} className={`rounded-2xl border p-4 ${priorityStyle}`}>
-                          <div className="flex flex-wrap items-start justify-between gap-3">
-                            <div>
-                              <h4 className="text-base font-semibold text-slate-900">{signal.company}</h4>
-                              <p className="text-sm text-slate-600">
-                                Trigger: {signal.triggerType} · Priority: {signal.priority.toUpperCase()}
-                              </p>
-                            </div>
-                            <span
-                              className={`rounded-full px-2.5 py-1 text-xs font-semibold ${
-                                signal.priority === "hot"
-                                  ? "bg-rose-100 text-rose-700"
-                                  : signal.priority === "warm"
-                                    ? "bg-amber-100 text-amber-700"
-                                    : "bg-slate-100 text-slate-700"
-                              }`}
-                            >
-                              {signal.priority}
-                            </span>
-                          </div>
-                          <p className="mt-2 text-sm text-slate-700">{signal.evidence}</p>
-                          <p className="mt-1 text-xs text-slate-500">Hiring manager: {signal.hiringManager}</p>
-                          <div className="mt-3 rounded-xl border border-blue-100 bg-blue-50/60 p-3">
-                            <p className="text-xs font-semibold uppercase tracking-wide text-blue-800">
-                              Outreach message (EN)
-                            </p>
-                            <p className="mt-1 text-sm text-slate-700">{signal.outreachMessage}</p>
-                            <a
-                              href={signal.sourceUrl}
-                              target="_blank"
-                              rel="noreferrer"
-                              className="mt-2 inline-flex text-xs font-semibold text-blue-700 underline decoration-blue-300 underline-offset-2 hover:text-blue-800"
-                            >
-                              Источник сигнала
-                            </a>
-                          </div>
-                          <div className="mt-3 max-w-[260px] rounded-xl border border-slate-200 bg-white p-3">
-                            <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">
-                              Статус outreach
-                            </label>
-                            <select
-                              value={signal.status}
-                              onChange={(e) =>
-                                updateSignalStatus(signal.id, parseOutreachStatus(e.target.value))
-                              }
-                              className="h-10 w-full rounded-lg border border-slate-300 bg-white px-2 text-sm outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
-                            >
-                              {OUTREACH_STATUS_OPTIONS.map((status) => (
-                                <option key={status} value={status}>
-                                  {status}
-                                </option>
-                              ))}
-                            </select>
-                          </div>
-                        </article>
-                      );
-                    })}
-                  </div>
-                )}
-              </>
-            )}
-          </section>
+              </section>
+            </>
+          )}
         </section>
       </div>
 
@@ -2253,7 +2860,7 @@ export default function Home() {
               <button
                 type="button"
                 onClick={() => setIsReportOpen(false)}
-                className="inline-flex h-9 items-center justify-center rounded-lg border border-slate-300 bg-white px-3 text-sm font-medium text-slate-700 transition hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-200 active:translate-y-px"
+                className="inline-flex h-9 items-center justify-center rounded-lg border border-slate-300 bg-white px-3 text-sm font-medium text-slate-700 transition hover:bg-slate-100"
               >
                 Закрыть
               </button>
