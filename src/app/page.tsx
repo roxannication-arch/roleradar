@@ -510,6 +510,31 @@ function statusReached(status: OutreachStatus, milestone: OutreachStatus): boole
   return OUTREACH_STATUS_RANK[status] >= OUTREACH_STATUS_RANK[milestone];
 }
 
+function maxOutreachStatus(left: OutreachStatus, right: OutreachStatus): OutreachStatus {
+  return OUTREACH_STATUS_RANK[left] >= OUTREACH_STATUS_RANK[right] ? left : right;
+}
+
+function mergeJobsPreservingBest(existing: JobItem[], incoming: JobItem[]): JobItem[] {
+  const byUrl = new Map<string, JobItem>();
+  const push = (candidate: JobItem) => {
+    const key = normalizeJobUrl(candidate.url) || candidate.id;
+    const prev = byUrl.get(key);
+    if (!prev) {
+      byUrl.set(key, candidate);
+      return;
+    }
+    const status = maxOutreachStatus(prev.status, candidate.status);
+    if (candidate.fitScore > prev.fitScore) {
+      byUrl.set(key, { ...candidate, status });
+      return;
+    }
+    byUrl.set(key, { ...prev, status });
+  };
+  for (const job of existing) push(job);
+  for (const job of incoming) push(job);
+  return [...byUrl.values()].sort((a, b) => b.fitScore - a.fitScore);
+}
+
 function detectSeniorityBand(value: string): Exclude<CandidateLevel, "auto"> {
   const text = normalize(value);
   if (
@@ -1942,13 +1967,24 @@ export default function Home() {
       try {
         const fallbackJobs = await fetchJobsFromFallbackEngine(activeClient, previousStatuses, profileSnapshot);
         if (fallbackJobs.length > 0) {
-          await persistJobsForClient(activeClient.id, fallbackJobs);
-          setJobsError("Claude временно недоступен, показаны результаты из fallback job engine.");
+          const existingJobs = jobsCacheByClient[activeClient.id]?.items ?? activeJobs;
+          const mergedJobs = mergeJobsPreservingBest(existingJobs, fallbackJobs);
+          const jobsToPersist = mergedJobs.length >= existingJobs.length ? mergedJobs : existingJobs;
+          await persistJobsForClient(activeClient.id, jobsToPersist);
+          setJobsError(
+            "Claude временно недоступен. Показаны fallback результаты и сохранены предыдущие релевантные вакансии.",
+          );
+        } else if (activeJobs.length > 0) {
+          setJobsError("Claude временно недоступен. Сохранены предыдущие результаты без перезаписи.");
         } else {
           setJobsError(humanizeClaudeError(error));
         }
       } catch {
-        setJobsError(humanizeClaudeError(error));
+        if (activeJobs.length > 0) {
+          setJobsError("Claude и fallback временно недоступны. Сохранены предыдущие результаты.");
+        } else {
+          setJobsError(humanizeClaudeError(error));
+        }
       }
     } finally {
       setIsJobsLoading(false);
