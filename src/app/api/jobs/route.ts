@@ -242,6 +242,20 @@ const DOMAIN_PROFILES: Record<
   },
 };
 
+function roleLikelySales(role: string): boolean {
+  const text = normalize(role);
+  if (!text) return false;
+  const salesSignals = [
+    "sales",
+    "account executive",
+    "business development",
+    "bdr",
+    "sdr",
+    "account manager",
+  ];
+  return salesSignals.some((signal) => containsTermInNormalized(text, signal));
+}
+
 function expandRoleConcepts(tokens: string[]): string[] {
   const expanded: string[] = [];
   for (const token of tokens) {
@@ -828,6 +842,7 @@ async function handleJobsRequest(inputRaw: JobsRequestInput) {
   const daysWindow = input.daysWindow;
   const resumeText = input.resumeText;
   const candidateBand = input.candidateBand;
+  const salesRoleRequested = roleLikelySales(role);
   const cutoffDate = new Date(Date.now() - daysWindow * 24 * 60 * 60 * 1000);
   const resumeSkills = extractResumeSkills(resumeText);
 
@@ -856,6 +871,12 @@ async function handleJobsRequest(inputRaw: JobsRequestInput) {
     const byRoleAdjacent = role
       ? byCompanySize.filter((job) => roleAdjacentMatch(job.title, role))
       : byCompanySize;
+    const removeSalesLeak = (jobs: RealJob[]): RealJob[] =>
+      salesRoleRequested
+        ? jobs
+        : jobs.filter((job) => !containsTermInNormalized(normalize(job.title), "account executive"));
+    const byRoleNoSalesLeak = removeSalesLeak(byRole);
+    const byRoleAdjacentNoSalesLeak = removeSalesLeak(byRoleAdjacent);
     const byRoleAdjacentSameBand = byRoleAdjacent.filter((job) => {
       const band = seniorityFromTitle(job.title);
       if (candidateBand === "junior") return band === "junior" || band === "middle";
@@ -863,7 +884,7 @@ async function handleJobsRequest(inputRaw: JobsRequestInput) {
       return true;
     });
     const strictRoleRequested = Boolean(roleIntentTokens(role).length);
-    const byBand = byRole.filter((job) => {
+    const byBand = byRoleNoSalesLeak.filter((job) => {
       const band = seniorityFromTitle(job.title);
       if (candidateBand === "junior") return band === "junior" || band === "middle";
       if (candidateBand === "middle") return band === "middle";
@@ -875,17 +896,17 @@ async function handleJobsRequest(inputRaw: JobsRequestInput) {
         ? byBand
         : byRoleAdjacentSameBand.length
           ? byRoleAdjacentSameBand
-        : byRoleAdjacent.length
-          ? byRoleAdjacent
-          : byRole.length
-            ? byRole
+        : byRoleAdjacentNoSalesLeak.length
+          ? byRoleAdjacentNoSalesLeak
+          : byRoleNoSalesLeak.length
+            ? byRoleNoSalesLeak
             : byCompanySize.length
               ? byCompanySize
               : recentOnly
       : byBand.length >= 8
         ? byBand
-        : byRole.length >= 8
-          ? byRole
+        : byRoleNoSalesLeak.length >= 8
+          ? byRoleNoSalesLeak
           : byCompanySize.length >= 8
             ? byCompanySize
             : recentOnly;
@@ -935,16 +956,16 @@ async function handleJobsRequest(inputRaw: JobsRequestInput) {
         ? "strict-role+band"
         : byRoleAdjacentSameBand.length
           ? "strict-role-adjacent+band"
-        : byRoleAdjacent.length
+        : byRoleAdjacentNoSalesLeak.length
           ? "strict-role-adjacent"
-          : byRole.length
+          : byRoleNoSalesLeak.length
             ? "strict-role"
             : byCompanySize.length
               ? "strict-company-size-fallback"
               : "strict-recent-fallback"
       : byBand.length >= 8
         ? "band"
-        : byRole.length >= 8
+        : byRoleNoSalesLeak.length >= 8
           ? "role"
           : byCompanySize.length >= 8
             ? "company-size"
@@ -1062,8 +1083,8 @@ async function handleJobsRequest(inputRaw: JobsRequestInput) {
       totalUS: usOnly.length,
       totalRecent: recentOnly.length,
       totalRecentAfterSize: byCompanySize.length,
-      totalRoleMatched: byRole.length,
-      totalRoleAdjacent: byRoleAdjacent.length,
+      totalRoleMatched: byRoleNoSalesLeak.length,
+      totalRoleAdjacent: byRoleAdjacentNoSalesLeak.length,
       totalBandMatched: byBand.length,
       poolUsed,
       minScoreApplied: minScore,

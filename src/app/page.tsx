@@ -548,6 +548,33 @@ function hasFallbackRoleEvidence(title: string, evidence: string, role: string):
   return true;
 }
 
+function isSalesLikeTitle(title: string): boolean {
+  const text = normalize(title);
+  const salesMarkers = [
+    "account executive",
+    "account manager",
+    "sales",
+    "business development",
+    "bdr",
+    "sdr",
+    "inside sales",
+  ];
+  return salesMarkers.some((marker) => text.includes(marker));
+}
+
+function isSalesRoleRequested(role: string): boolean {
+  const roleText = normalize(role);
+  if (!roleText) return false;
+  return [
+    "sales",
+    "account executive",
+    "business development",
+    "bdr",
+    "sdr",
+    "account manager",
+  ].some((term) => roleText.includes(term));
+}
+
 function normalizeResumeProfile(raw: unknown, fallbackLocation: string): ResumeProfile {
   const input = (raw || {}) as Record<string, unknown>;
   const toStringArray = (value: unknown, max = 10): string[] =>
@@ -1655,6 +1682,7 @@ export default function Home() {
       { companySizes: ["startup", "scaleup", "enterprise"], daysWindow: 7, location: "" },
       { companySizes: ["startup", "scaleup", "enterprise"], daysWindow: 14, location: "" },
     ];
+    const salesRequested = isSalesRoleRequested(fallbackRole);
 
     const mergedByUrl = new Map<string, JobItem>();
     for (const scenario of scenarios) {
@@ -1685,6 +1713,7 @@ export default function Home() {
         const evidence = item.fitReason || "Вакансия получена из fallback-движка RoleRadar.";
         const score = typeof item.matchScore === "number" ? clamp(item.matchScore, 0, 100) : 62;
         if (fallbackRole && !hasFallbackRoleEvidence(title, evidence, fallbackRole)) continue;
+        if (!salesRequested && isSalesLikeTitle(title)) continue;
         if (fallbackRole && score < 52) continue;
 
         const existing = mergedByUrl.get(url);
