@@ -257,6 +257,11 @@ function parseSignalTrigger(value: unknown): SignalTrigger {
   return "contract";
 }
 
+function makeDbId(prefix: string): string {
+  const random = Math.random().toString(36).slice(2, 10);
+  return `${prefix}-${Date.now().toString(36)}-${random}`;
+}
+
 function normalizeJobUrl(url: string): string {
   try {
     const parsed = new URL(url);
@@ -746,9 +751,11 @@ async function migrateLegacyLocalStorageData(
   if (!legacyClients.length) return false;
 
   for (const legacyClient of legacyClients) {
+    const clientId = makeDbId("client");
     const { data: insertedClient, error: insertClientError } = await supabase
       .from("clients")
       .insert({
+        id: clientId,
         consultant_id: ownerUserId,
         name: legacyClient.name,
         resume: legacyClient.resume,
@@ -771,6 +778,7 @@ async function migrateLegacyLocalStorageData(
     if (legacyResumeEntry?.profile) {
       await supabase.from("resume_analysis").upsert(
         {
+          id: makeDbId("resume"),
           client_id: insertedClient.id,
           profile: legacyResumeEntry.profile,
           source_fingerprint: legacyResumeEntry.sourceFingerprint || `${legacyClient.id}-legacy`,
@@ -782,6 +790,7 @@ async function migrateLegacyLocalStorageData(
     const legacyJobsEntry = legacyJobsMap[legacyClient.id] as { items?: JobItem[] } | undefined;
     if (legacyJobsEntry?.items?.length) {
       const rows: Database["public"]["Tables"]["jobs"]["Insert"][] = legacyJobsEntry.items.map((job) => ({
+        id: makeDbId("job"),
         client_id: insertedClient.id,
         title: job.title,
         company: job.company,
@@ -804,6 +813,7 @@ async function migrateLegacyLocalStorageData(
     if (legacySignalsEntry?.items?.length) {
       const rows: Database["public"]["Tables"]["signals"]["Insert"][] = legacySignalsEntry.items.map(
         (signal) => ({
+          id: makeDbId("signal"),
           client_id: insertedClient.id,
           company: signal.company,
           trigger_type: parseSignalTrigger(signal.triggerType),
@@ -1153,6 +1163,7 @@ export default function Home() {
     const consultantId =
       userRole === "admin" ? newClientConsultantId || user.id : user.id;
     const payload: Database["public"]["Tables"]["clients"]["Insert"] = {
+      id: makeDbId("client"),
       consultant_id: consultantId,
       name: trimmedName,
       resume: "",
@@ -1319,6 +1330,7 @@ export default function Home() {
         .from("resume_analysis")
         .upsert(
           {
+            id: makeDbId("resume"),
             client_id: clientSnapshot.id,
             profile,
             source_fingerprint: currentFingerprint,
@@ -1696,6 +1708,7 @@ export default function Home() {
       return;
     }
     const payload: Database["public"]["Tables"]["jobs"]["Insert"][] = jobs.map((job) => ({
+      id: makeDbId("job"),
       client_id: clientId,
       title: job.title,
       company: job.company,
@@ -1729,6 +1742,7 @@ export default function Home() {
       return;
     }
     const payload: Database["public"]["Tables"]["signals"]["Insert"][] = signals.map((signal) => ({
+      id: makeDbId("signal"),
       client_id: clientId,
       company: signal.company,
       trigger_type: signal.triggerType,
