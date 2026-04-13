@@ -573,6 +573,85 @@ function hasFallbackRoleEvidence(title: string, evidence: string, role: string):
   return true;
 }
 
+function buildRoleTokens(role: string): string[] {
+  const stop = new Set([
+    "senior",
+    "junior",
+    "middle",
+    "lead",
+    "principal",
+    "staff",
+    "manager",
+    "specialist",
+    "associate",
+    "global",
+    "remote",
+    "the",
+    "and",
+    "for",
+  ]);
+  return tokenize(role).filter((token) => !stop.has(token));
+}
+
+function inferRoleFamily(tokens: string[]): "sales" | "hr-mobility" | "engineering" | "product" | "data" | "other" {
+  const sales = ["sales", "account", "executive", "business", "development", "bdr", "sdr"];
+  const hrMobility = ["mobility", "immigration", "relocation", "recruit", "talent", "people", "hr"];
+  const engineering = ["engineer", "backend", "frontend", "software", "platform", "devops"];
+  const product = ["product", "pm"];
+  const data = ["data", "analytics", "analyst", "scientist", "ml"];
+  if (tokens.some((token) => sales.includes(token))) return "sales";
+  if (tokens.some((token) => hrMobility.includes(token))) return "hr-mobility";
+  if (tokens.some((token) => engineering.includes(token))) return "engineering";
+  if (tokens.some((token) => product.includes(token))) return "product";
+  if (tokens.some((token) => data.includes(token))) return "data";
+  return "other";
+}
+
+function isRoleFamilyCompatible(
+  title: string,
+  evidence: string,
+  requestedFamily: ReturnType<typeof inferRoleFamily>,
+): boolean {
+  if (requestedFamily === "other") return true;
+  const text = normalize(`${title} ${evidence}`);
+  const hasSales = [
+    "account executive",
+    "sales",
+    "business development",
+    "bdr",
+    "sdr",
+    "inside sales",
+    "closing",
+  ].some((term) => text.includes(term));
+  const hasHrMobility = [
+    "mobility",
+    "immigration",
+    "relocation",
+    "talent acquisition",
+    "recruiter",
+    "people operations",
+    "human resources",
+  ].some((term) => text.includes(term));
+  const hasEngineering = [
+    "engineer",
+    "backend",
+    "frontend",
+    "software",
+    "platform",
+    "devops",
+  ].some((term) => text.includes(term));
+  const hasProduct = ["product manager", "product", "pm", "roadmap"].some((term) => text.includes(term));
+  const hasData = ["data", "analytics", "analyst", "scientist", "machine learning"].some((term) =>
+    text.includes(term),
+  );
+  if (requestedFamily === "sales") return hasSales;
+  if (requestedFamily === "hr-mobility") return hasHrMobility && !hasSales;
+  if (requestedFamily === "engineering") return hasEngineering && !hasSales;
+  if (requestedFamily === "product") return hasProduct && !hasSales;
+  if (requestedFamily === "data") return hasData && !hasSales;
+  return true;
+}
+
 function isSalesLikeTitle(title: string): boolean {
   const text = normalize(title);
   const salesMarkers = [
@@ -1707,7 +1786,9 @@ export default function Home() {
       { companySizes: ["startup", "scaleup", "enterprise"], daysWindow: 7, location: "" },
       { companySizes: ["startup", "scaleup", "enterprise"], daysWindow: 14, location: "" },
     ];
-    const salesRequested = isSalesRoleRequested(fallbackRole);
+    const roleTokens = buildRoleTokens(fallbackRole);
+    const requestedFamily = inferRoleFamily(roleTokens);
+    const salesRequested = isSalesRoleRequested(fallbackRole) || requestedFamily === "sales";
 
     const mergedByUrl = new Map<string, JobItem>();
     for (const scenario of scenarios) {
@@ -1739,6 +1820,7 @@ export default function Home() {
         const score = typeof item.matchScore === "number" ? clamp(item.matchScore, 0, 100) : 62;
         if (fallbackRole && !hasFallbackRoleEvidence(title, evidence, fallbackRole)) continue;
         if (!salesRequested && isSalesLikeTitle(title)) continue;
+        if (!isRoleFamilyCompatible(title, evidence, requestedFamily)) continue;
         if (fallbackRole && score < 52) continue;
 
         const existing = mergedByUrl.get(url);
