@@ -126,17 +126,23 @@ alter table public.jobs enable row level security;
 alter table public.signals enable row level security;
 
 drop policy if exists profiles_select_own on public.profiles;
-create policy profiles_select_own on public.profiles
-for select using (id = auth.uid());
+create policy profiles_select_policy on public.profiles
+for select using (
+  id = auth.uid() or public.current_user_role() = 'admin'
+);
 
 drop policy if exists profiles_insert_own on public.profiles;
 create policy profiles_insert_own on public.profiles
 for insert with check (id = auth.uid());
 
 drop policy if exists profiles_update_own on public.profiles;
-create policy profiles_update_own on public.profiles
-for update using (id = auth.uid())
-with check (id = auth.uid());
+create policy profiles_update_policy on public.profiles
+for update using (
+  id = auth.uid() or public.current_user_role() = 'admin'
+)
+with check (
+  id = auth.uid() or public.current_user_role() = 'admin'
+);
 
 drop policy if exists clients_select_policy on public.clients;
 create policy clients_select_policy on public.clients

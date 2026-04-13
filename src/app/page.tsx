@@ -833,6 +833,8 @@ export default function Home() {
   const [user, setUser] = useState<User | null>(null);
   const [userRole, setUserRole] = useState<UserRole | null>(null);
   const [consultants, setConsultants] = useState<ConsultantOption[]>([]);
+  const [isAdminUsersOpen, setIsAdminUsersOpen] = useState(false);
+  const [isSavingUserProfiles, setIsSavingUserProfiles] = useState(false);
 
   const [authMode, setAuthMode] = useState<"signin" | "signup">("signin");
   const [authEmail, setAuthEmail] = useState("");
@@ -840,6 +842,7 @@ export default function Home() {
   const [authError, setAuthError] = useState("");
   const [authInfo, setAuthInfo] = useState("");
   const [isAuthActionLoading, setIsAuthActionLoading] = useState(false);
+  const [adminPanelError, setAdminPanelError] = useState("");
 
   const [clients, setClients] = useState<Client[]>([]);
   const [activeClientId, setActiveClientId] = useState<string>("");
@@ -1034,6 +1037,50 @@ export default function Home() {
     for (const consultant of consultants) map.set(consultant.id, consultant);
     return map;
   }, [consultants]);
+
+  function updateConsultantDraft(
+    consultantId: string,
+    patch: Partial<Pick<ConsultantOption, "fullName" | "role">>,
+  ) {
+    setConsultants((prev) =>
+      prev.map((item) => (item.id === consultantId ? { ...item, ...patch } : item)),
+    );
+  }
+
+  async function saveUserProfiles() {
+    if (!supabase || userRole !== "admin") return;
+    setIsSavingUserProfiles(true);
+    setAdminPanelError("");
+    setAppError("");
+    try {
+      const updates = consultants.map((item) => ({
+        id: item.id,
+        role: item.role,
+        full_name: item.fullName,
+      }));
+      const self = updates.find((item) => item.id === user?.id);
+      if (self && self.role !== "admin") {
+        throw new Error("Нельзя снять роль admin у текущего пользователя.");
+      }
+      for (const item of updates) {
+        const { error } = await supabase
+          .from("profiles")
+          .update({ role: item.role, full_name: item.full_name })
+          .eq("id", item.id);
+        if (error) throw error;
+      }
+      if (user) {
+        await loadAllDataForUser(user);
+      }
+      setIsAdminUsersOpen(false);
+    } catch (error) {
+      setAdminPanelError(
+        error instanceof Error ? error.message : "Не удалось сохранить профили пользователей.",
+      );
+    } finally {
+      setIsSavingUserProfiles(false);
+    }
+  }
 
   const activeClient = useMemo(
     () => clients.find((client) => client.id === activeClientId),
@@ -2214,6 +2261,15 @@ export default function Home() {
                 Выйти
               </button>
             </div>
+            {userRole === "admin" ? (
+              <button
+                type="button"
+                onClick={() => setIsAdminUsersOpen(true)}
+                className="mt-3 inline-flex h-9 items-center justify-center rounded-lg border border-indigo-200 bg-indigo-50 px-3 text-xs font-semibold text-indigo-700 hover:bg-indigo-100"
+              >
+                Управление пользователями
+              </button>
+            ) : null}
             <div className="mt-5 space-y-2">
               <input
                 value={newClientName}
@@ -2870,6 +2926,106 @@ export default function Home() {
                 {generatedReport || "Сгенерируйте отчёт, чтобы увидеть содержимое."}
               </pre>
             </div>
+          </div>
+        </div>
+      ) : null}
+
+      {isAdminUsersOpen ? (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-900/50 p-4 backdrop-blur-[2px]">
+          <div className="max-h-[88vh] w-full max-w-4xl overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-2xl">
+            <header className="flex items-center justify-between border-b border-slate-200 px-6 py-4">
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-[0.2em] text-indigo-600">Admin Panel</p>
+                <h3 className="mt-1 text-xl font-semibold">Управление пользователями</h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsAdminUsersOpen(false)}
+                className="inline-flex h-9 items-center justify-center rounded-lg border border-slate-300 bg-white px-3 text-sm font-medium text-slate-700 transition hover:bg-slate-100"
+              >
+                Закрыть
+              </button>
+            </header>
+            <div className="max-h-[72vh] overflow-y-auto px-6 py-5">
+              {adminPanelError ? (
+                <div className="mb-3 rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">
+                  {adminPanelError}
+                </div>
+              ) : null}
+              <div className="space-y-3">
+                {consultants.map((consultant) => {
+                  const isSelf = consultant.id === user?.id;
+                  return (
+                    <article
+                      key={consultant.id}
+                      className="rounded-2xl border border-slate-200 bg-slate-50/70 p-4"
+                    >
+                      <div className="grid grid-cols-1 gap-3 md:grid-cols-[1.2fr_1fr_auto]">
+                        <div>
+                          <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">
+                            Имя пользователя
+                          </label>
+                          <input
+                            value={consultant.fullName || ""}
+                            onChange={(e) =>
+                              updateConsultantDraft(consultant.id, {
+                                fullName: e.target.value,
+                              })
+                            }
+                            placeholder="Например, Jane Smith"
+                            className="h-10 w-full rounded-xl border border-slate-300 bg-white px-3 text-sm outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100"
+                          />
+                        </div>
+                        <div>
+                          <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">
+                            Роль
+                          </label>
+                          <select
+                            value={consultant.role}
+                            onChange={(e) =>
+                              updateConsultantDraft(consultant.id, {
+                                role: e.target.value as UserRole,
+                              })
+                            }
+                            disabled={isSelf}
+                            className="h-10 w-full rounded-xl border border-slate-300 bg-white px-3 text-sm outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 disabled:cursor-not-allowed disabled:opacity-70"
+                          >
+                            <option value="consultant">consultant</option>
+                            <option value="admin">admin</option>
+                          </select>
+                          {isSelf ? (
+                            <p className="mt-1 text-[11px] text-slate-500">
+                              Ваша роль редактируется только через другого admin.
+                            </p>
+                          ) : null}
+                        </div>
+                        <div className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs text-slate-600">
+                          <p className="font-medium text-slate-700">Email</p>
+                          <p className="mt-1 break-all">{consultant.email}</p>
+                        </div>
+                      </div>
+                    </article>
+                  );
+                })}
+              </div>
+            </div>
+            <footer className="flex items-center justify-end gap-2 border-t border-slate-200 px-6 py-4">
+              <button
+                type="button"
+                onClick={() => setIsAdminUsersOpen(false)}
+                className="inline-flex h-10 items-center justify-center rounded-xl border border-slate-300 bg-white px-4 text-sm font-medium text-slate-700 transition hover:bg-slate-100"
+              >
+                Отмена
+              </button>
+              <button
+                type="button"
+                onClick={() => void saveUserProfiles()}
+                disabled={isSavingUserProfiles}
+                className="inline-flex h-10 items-center justify-center rounded-xl bg-indigo-600 px-4 text-sm font-medium text-white transition hover:bg-indigo-700 disabled:opacity-70"
+              >
+                {isSavingUserProfiles ? "Сохраняем..." : "Сохранить изменения"}
+              </button>
+            </footer>
           </div>
         </div>
       ) : null}
