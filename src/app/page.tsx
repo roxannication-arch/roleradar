@@ -1564,7 +1564,12 @@ export default function Home() {
       resumeFileName: file.name,
       resumeFileSignature: `${file.name}:${file.size}:${file.lastModified}`,
     });
-    setResumeInputError("");
+    if (
+      resumeInputError.includes("Ошибка /api/claude") ||
+      resumeInputError.toLowerCase().includes("claude")
+    ) {
+      setResumeInputError("");
+    }
     try {
       await ensureResumeAnalysis(nextClient, false, file);
     } catch (error) {
@@ -1597,7 +1602,12 @@ export default function Home() {
     const nextResume = `${activeClient.resume.slice(0, start)}${pasted}${activeClient.resume.slice(end)}`;
     const nextClient = { ...activeClient, resume: nextResume };
     updateActiveClient({ resume: nextResume });
-    setResumeInputError("");
+    if (
+      resumeInputError.includes("Ошибка /api/claude") ||
+      resumeInputError.toLowerCase().includes("claude")
+    ) {
+      setResumeInputError("");
+    }
     if (!resumeAnalysisByClient[activeClient.id]) {
       void ensureResumeAnalysis(nextClient, false).catch(() =>
         setResumeInputError("Не удалось автоматически распарсить вставленное резюме."),
