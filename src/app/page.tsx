@@ -739,6 +739,41 @@ function normalizeResumeProfile(raw: unknown, fallbackLocation: string): ResumeP
   };
 }
 
+function inferFallbackSeniority(clientSnapshot: Client, years: number | null): string {
+  if (clientSnapshot.candidateLevel !== "auto") {
+    return clientSnapshot.candidateLevel;
+  }
+  if (years === null) {
+    return "unknown";
+  }
+  if (years >= 8) return "senior";
+  if (years >= 3) return "middle";
+  return "junior";
+}
+
+function buildFallbackResumeProfile(clientSnapshot: Client): ResumeProfile {
+  const parsedYears = Number.parseInt(clientSnapshot.experienceYears, 10);
+  const years = Number.isFinite(parsedYears) ? clamp(parsedYears, 0, 50) : null;
+  const fallbackSkills = unique([
+    ...tokenize(clientSnapshot.targetRole).slice(0, 6),
+    ...tokenize(clientSnapshot.resume).slice(0, 24),
+  ]).slice(0, 10);
+  const preferredCompanySize = clientSnapshot.preferredCompanySizes.length
+    ? clientSnapshot.preferredCompanySizes.join(", ")
+    : "unknown";
+
+  return {
+    jobTitlesCurrent: [],
+    jobTitlesTarget: clientSnapshot.targetRole.trim() ? [clientSnapshot.targetRole.trim()] : [],
+    totalYearsExperience: years,
+    topSkills: fallbackSkills,
+    industries: [],
+    seniorityLevel: inferFallbackSeniority(clientSnapshot, years),
+    location: clientSnapshot.location || "United States",
+    preferredCompanySize,
+  };
+}
+
 function mapClientRow(row: ClientRow): Client {
   return {
     id: row.id,
@@ -1517,8 +1552,20 @@ export default function Home() {
       }));
       return profile;
     } catch (error) {
-      if (cached?.profile && shouldUseCachedResumeOnClaudeFailure(error)) {
-        return cached.profile;
+      if (shouldUseCachedResumeOnClaudeFailure(error)) {
+        if (cached?.profile) {
+          return cached.profile;
+        }
+        const fallbackProfile = buildFallbackResumeProfile(clientSnapshot);
+        setResumeAnalysisByClient((prev) => ({
+          ...prev,
+          [clientSnapshot.id]: {
+            profile: fallbackProfile,
+            timestamp: Date.now(),
+            sourceFingerprint: currentFingerprint,
+          },
+        }));
+        return fallbackProfile;
       }
       throw error;
     } finally {
